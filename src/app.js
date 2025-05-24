@@ -35,8 +35,18 @@ const peopleRoutes = require('./api/peopleRoutes');
 // All paths under /People will be handled by peopleRoutes
 app.use('/People', peopleRoutes);
 
-// TODO: 在后续步骤中，这里将挂载其他路由模块 (例如系统记录、识别记录等)
-// In later steps, other route modules will be mounted here (e.g., system records, identification records, etc.).
+// 导入记录相关的路由模块
+// Import record-related route modules
+const recordRoutes = require('./api/recordRoutes');
+
+// 挂载记录路由
+// Mount record routes
+// 所有 /Record 下的路径都将由 recordRoutes 处理
+// All paths under /Record will be handled by recordRoutes
+app.use('/Record', recordRoutes);
+
+// TODO: 在后续步骤中，这里将挂载其他路由模块 (例如系统记录等)
+// In later steps, other route modules will be mounted here (e.g., system records, etc.).
 
 // 导出 Express 应用实例，以便在 server.js 中使用
 // Export the Express app instance for use in server.js

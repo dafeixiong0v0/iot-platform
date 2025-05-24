@@ -17,6 +17,14 @@ const uploadResultJsonAndPhoto = multer().fields([{ name: 'ResultJson', maxCount
 // Configure multer for /Device/UploadSnapshoot
 const uploadSnapshoot = multer().fields([{ name: 'SN', maxCount: 1 }, { name: 'Photo', maxCount: 1 }]);
 
+// 为 /Device/RequestAuthorization 配置 multer
+// Configure multer for /Device/RequestAuthorization
+const uploadAuthRequest = multer().fields([
+    { name: 'SN', maxCount: 1 },
+    { name: 'RecordDetail', maxCount: 1 }, // JSON string
+    { name: 'Photo', maxCount: 1 }         // Optional photo file
+]);
+
 // 处理设备心跳包请求
 // Handle device keepalive requests
 // @route POST /Device/Keepalive
@@ -48,6 +56,66 @@ router.post('/Keepalive', (req, res) => {
         "SyncParameter": 0, // 1--表示有参数需要设置到设备 (1 -- means parameters need to be set to the device)
         "Remote": 0, // 1--表示有远程操作需要处理 (1 -- means remote operations need to be processed)
         "UploadWorkParameter": 0 // 1--表示要求设备上传设备工作参数 (1 -- means the device is required to upload work parameters)
+    });
+});
+
+// 处理设备在线鉴权请求
+// @route POST /Device/RequestAuthorization
+// @desc 设备请求服务器进行实时在线鉴权 (例如：开门请求) (Device requests real-time online authorization from the server (e.g., door open request))
+// @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
+router.post('/RequestAuthorization', uploadAuthRequest, (req, res) => {
+    // 从请求体和文件获取数据
+    // Get data from request body and files
+    const { SN, RecordDetail } = req.body;
+    const photoFile = (req.files && req.files.Photo) ? req.files.Photo[0] : null;
+
+    // 打印接收到的设备SN (用于当前阶段的调试)
+    // Print received device SN (for debugging in the current phase)
+    console.log(`设备 SN: ${SN} 发起在线鉴权请求。 (Device SN: ${SN} initiates online authorization request.)`);
+
+    let recordDetailJson = {};
+    if (RecordDetail) {
+        try {
+            // 注意：文档提到 RecordDetail 内容可能经过gzip压缩。此处暂时假定为普通JSON字符串。
+            // Gzip 解压逻辑可以在后续步骤中添加。
+            // Note: The document mentions that RecordDetail content might be gzip compressed. Here, we temporarily assume it's a plain JSON string.
+            // Gzip decompression logic can be added in subsequent steps.
+            recordDetailJson = JSON.parse(RecordDetail);
+            // 打印部分鉴权记录详情
+            // Print partial authorization record details
+            console.log(`鉴权记录详情: RecordID=${recordDetailJson.RecordID}, RecordType=${recordDetailJson.RecordType}, UserID=${recordDetailJson.UserID || 'N/A'}`);
+        } catch (error) {
+            console.error("解析鉴权记录详情 (RecordDetail) JSON 字符串失败 (Failed to parse authorization record detail (RecordDetail) JSON string):", error);
+            // 在实际应用中，可能需要返回错误响应，例如：
+            // In a real application, an error response might be needed, e.g.:
+            // return res.status(400).json({ Success: 0, Message: "记录详情格式错误 (Record detail format error)" });
+        }
+    } else {
+        console.log("请求中未找到鉴权记录详情 (RecordDetail) 字段。 (Authorization record detail (RecordDetail) field not found in request.)");
+        // 根据需求，如果 RecordDetail 是必需的，可以返回错误
+        // Depending on requirements, if RecordDetail is mandatory, an error can be returned
+        // return res.status(400).json({ Success: 0, Message: "缺少记录详情 (Missing record detail)" });
+    }
+
+    if (photoFile) {
+        console.log(`上传了鉴权现场照片 (Uploaded authorization site photo): ${photoFile.originalname}, 大小 (Size): ${photoFile.size} bytes`);
+        // TODO: 在后续步骤中，这里将包含照片文件的处理逻辑，例如保存到 GridFS 或文件系统，并与鉴权记录关联
+        // In subsequent steps, this will include logic for handling the photo file, e.g., saving to GridFS or filesystem, and associating it with the authorization record.
+    }
+
+    // TODO: 在后续步骤中，这里将包含核心的鉴权逻辑:
+    // In subsequent steps, this will include the core authorization logic:
+    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
+    // 2. 解析 RecordDetail 中的信息 (UserID, RecordType, CardNum, QRCode等) (Parse information from RecordDetail (UserID, RecordType, CardNum, QRCode, etc.))
+    // 3. 查询 People 集合，检查人员是否存在、权限是否有效 (有效期、开门次数、时段、节假日等) (Query People collection, check if personnel exists and if permissions are valid (expiration date, door open times, time slots, holidays, etc.))
+    // 4. 查询 Device 集合或相关规则，检查设备状态或特定门禁规则 (Query Device collection or related rules, check device status or specific access control rules)
+    // 5. 根据综合判断，返回相应的 Success 值 (0-拒绝, 1-允许并显示消息, 2-允许不显示消息) 和 Message (Based on comprehensive judgment, return corresponding Success value (0-reject, 1-allow and display message, 2-allow and do not display message) and Message)
+
+    // 当前默认返回允许操作并显示消息
+    // Currently defaults to allowing operation and displaying a message
+    res.json({
+        "Success": 1, // 1 = 鉴权成功，开门并显示鉴权消息 (1 = Authorization successful, open door and display authorization message)
+        "Message": "允许操作 (平台默认)" // 可选的提示信息 (Optional informational message)
     });
 });
 
