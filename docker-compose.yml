@@ -1,0 +1,65 @@
+# docker-compose.yml (Docker Compose 文件占位符)
+version: '3.8' # 指定 Docker Compose 文件版本
+
+services:
+  # 后端 Node.js 服务
+  backend:
+    build:
+      context: . # Dockerfile.backend 应该在当前目录
+      dockerfile: Dockerfile.backend
+    ports:
+      - "3000:3000" # 将主机的3000端口映射到容器的3000端口
+    volumes:
+      - .:/usr/src/app # (开发模式) 将当前目录挂载到容器中，方便代码热更新
+      - /usr/src/app/node_modules # (开发模式) 避免覆盖容器中的node_modules
+    environment:
+      - NODE_ENV=development # 设置环境变量
+      - MONGO_URI=mongodb://mongo_db:27017/iot_platform # MongoDB 连接字符串, 'mongo_db' 是服务名
+    depends_on:
+      - mongo_db # 声明依赖于 MongoDB 服务
+    # command: npm run dev # (开发模式) 如果有nodemon等工具
+    networks:
+      - iot-network # 使用自定义网络
+    restart: unless-stopped # 容器退出时重启策略，除非手动停止
+
+  # 前端 Vue.js 服务 (由 Nginx 服务)
+  frontend:
+    build:
+      context: . # Dockerfile.frontend 应该在当前目录
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8080:80" # 将主机的8080端口映射到容器Nginx的80端口
+    depends_on: # 可选，如果前端启动时需要后端API可用
+      - backend
+    networks:
+      - iot-network
+    restart: unless-stopped # 容器退出时重启策略，除非手动停止
+
+  # MongoDB 服务
+  mongo_db:
+    image: mongo:6.0 # 使用官方 MongoDB 6.0 镜像 (建议使用特定版本而非 latest)
+    ports:
+      - "27017:27017" # 将主机的27017端口映射到容器的27017端口
+    volumes:
+      - mongo_data:/data/db # 使用名为 mongo_data 的数据卷持久化数据库数据到容器内的 /data/db 目录
+    networks:
+      - iot-network # 分配到 iot-network 网络
+    restart: always # 容器退出时总是重启 (适合数据库等关键服务)
+    # environment: # 可选：设置MongoDB初始化用户名和密码 (生产环境推荐)
+    #   - MONGO_INITDB_ROOT_USERNAME=admin
+    #   - MONGO_INITDB_ROOT_PASSWORD=secretpassword
+
+# 自定义网络
+networks:
+  iot-network:
+    driver: bridge # 使用桥接网络驱动
+
+# 数据卷定义
+volumes:
+  mongo_data: {} # 定义名为 mongo_data 的数据卷，Docker 会自动管理其存储位置
+
+# 添加中文注释:
+# 这个 docker-compose.yml 文件用于定义和运行多容器 Docker 应用。
+# 它包含后端服务、前端服务，以及一个可选的 MongoDB 数据库服务。
+# 在实际部署前，请根据需要取消注释并配置数据库服务、环境变量和卷。
+# 'context: .' 表示 Dockerfile 位于 docker-compose.yml 所在的目录。

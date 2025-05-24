@@ -19,6 +19,7 @@
   "homepage": "https://github.com/dafeixiong0v0/iot-platform#readme",
   "dependencies": {
     "express": "^5.1.0",
+    "mongoose": "^7.0.0",
     "multer": "^2.0.0"
   }
 }
