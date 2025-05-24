@@ -4,6 +4,7 @@ const express = require('express');
 // 创建路由实例
 // Create a router instance
 const router = express.Router();
+const People = require('../models/people'); // 引入People模型 (Import People model)
 
 // 导入 multer 用于处理 multipart/form-data
 // Import multer for handling multipart/form-data
@@ -21,33 +22,69 @@ const peopleUpload = multer().fields([
 
 // 处理设备拉取人员授权信息的请求
 // @route POST /People/DownloadPeopleList
-// @desc 设备请求下载授权人员列表 (Device requests to download the list of authorized personnel)
+// @desc 设备请求下载授权人员列表
+// (Device requests to download the list of authorized personnel)
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/DownloadPeopleList', (req, res) => {
-    // 从请求体中获取设备SN和请求数量限制
-    // Get device SN and request quantity limit from the request body
+router.post('/DownloadPeopleList', async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN, Limit } = req.body;
 
-    // 打印接收到的设备SN和Limit (用于当前阶段的调试)
-    // Print received device SN and Limit (for debugging in the current phase)
-    console.log(`设备 SN: ${SN} 请求下载人员列表，数量限制: ${Limit}。 (Device SN: ${SN} requests download of personnel list, limit: ${Limit}.)`);
+    if (!SN) {
+        // 如果SN为空，则返回错误 (If SN is empty, return an error)
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空 (DeviceSN cannot be empty)' });
+    }
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 根据设备SN和Limit参数，以及可能的其他筛选条件（如上次同步时间戳），从 People 集合查询相应的人员数据 (Query corresponding personnel data from the People collection based on device SN, Limit parameter, and possibly other filtering criteria like last sync timestamp)
-    // 3. 构建 PeopleList 数组，其中每个元素都符合 "PeopleJson人员数据格式" (Construct the PeopleList array, where each element conforms to "PeopleJson personnel data format")
-    // 4. 处理照片、人脸特征、指纹等二进制数据（例如，提供URL或Base64编码） (Handle binary data like photos, facial features, fingerprints (e.g., provide URL or Base64 encoding))
-    // 5. 实现分页逻辑，以支持大量人员数据的分批下载 (Implement pagination logic to support batch download of large amounts of personnel data)
+    // 解析 Limit 参数，确保是数字，并设置默认/最大值
+    // (Parse Limit parameter, ensure it's a number, and set default/max values)
+    let parsedLimit = parseInt(Limit, 10);
+    if (isNaN(parsedLimit) || parsedLimit <= 0) {
+        parsedLimit = 50; // API文档中未明确默认值，暂定50 (API documentation doesn't specify default, tentatively set to 50)
+    }
+    parsedLimit = Math.min(parsedLimit, 1000); // API文档规定最大1000 (API documentation specifies max 1000)
 
-    // 当前返回空的人员列表作为占位符响应
-    // Currently return an empty personnel list as a placeholder response
-    res.json({
-        "Success": 1, // 1 表示操作成功 (1 means operation successful)
-        "Message": "当前无人员信息可供下载", // 可选的提示信息 (Optional informational message)
-        "PeopleCount": 0, // 当前返回的人员数量 (Number of personnel currently returned)
-        "PeopleList": [] // 人员数据列表，当前为空 (List of personnel data, currently empty)
-    });
+    console.log(`设备 SN: ${SN} 请求下载人员列表，数量限制: ${parsedLimit}。 (Device SN: ${SN} requests download of personnel list, limit: ${parsedLimit}.)`);
+
+    try {
+        // 查询人员列表
+        // (Query personnel list)
+        // TODO: 根据实际的人员与设备关联逻辑调整查询条件。
+        // (TODO: Adjust query conditions based on actual personnel-device association logic.)
+        // 当前假设：任何已注册设备都可以下载平台上的（部分）人员。
+        // (Current assumption: Any registered device can download (part of) the personnel on the platform.)
+        // 如果人员是与特定设备SN绑定的 (例如通过 People schema 中的 deviceSNs 字段),
+        // (If personnel are bound to specific device SNs (e.g., via deviceSNs field in People schema),)
+        // 则查询应为: People.find({ deviceSNs: SN }).limit(parsedLimit);
+        // (then the query should be: People.find({ deviceSNs: SN }).limit(parsedLimit);)
+        // 为简化当前步骤，我们先假设一个全局可下载的列表，仅用Limit限制。
+        // (To simplify the current step, we assume a globally downloadable list, limited only by Limit.)
+        const peopleListFromDB = await People.find({}) // 示例：查找所有人员 (Example: find all personnel)
+            .limit(parsedLimit)
+            // .select('UserID Name Job Department IdentityCard Attachment Photo PhotoMD5 Password CardNum QRCode AccessType ExpirationDate OpenTimes KeepOpen Timegroup Holidays Elevators FaceFeature FaceFeatureMD5 Fingerprints Palmveins') // 选择API文档中定义的字段 (Select fields defined in API documentation)
+            // 上面的select太长，且People模型字段已对应，lean()更合适
+            // (The select above is too long, and People model fields already correspond; lean() is more appropriate)
+            .lean(); // 使用 .lean() 获取普通JS对象，而不是Mongoose文档，可能更接近设备期望的纯净数据
+                     // (Use .lean() to get plain JS objects instead of Mongoose documents, possibly closer to device's expected raw data)
+
+        // Mongoose的 .lean() 会移除 Mongoose 特有的方法和虚拟属性，但仍会包含 _id 和 __v。
+        // (Mongoose's .lean() removes Mongoose-specific methods and virtual properties, but will still include _id and __v.)
+        // 如果设备端严格不接受这些字段，需要进一步转换。
+        // (If the device strictly does not accept these fields, further transformation is needed.)
+        // 例如: const transformedList = peopleListFromDB.map(p => { const { _id, __v, createdAt, updatedAt, ...rest } = p; return rest; });
+        // (Example: const transformedList = peopleListFromDB.map(p => { const { _id, __v, createdAt, updatedAt, ...rest } = p; return rest; });)
+        // 当前People模型已包含大部分所需字段，我们直接返回 lean() 的结果。
+        // (The current People model already contains most required fields; we directly return the result of lean().)
+
+        console.log(`为设备 SN: ${SN} 找到 ${peopleListFromDB.length} 条人员记录。 (Found ${peopleListFromDB.length} personnel records for device SN: ${SN}.)`);
+        
+        res.json({
+            "Success": 1,
+            "PeopleCount": peopleListFromDB.length,
+            "PeopleList": peopleListFromDB 
+        });
+
+    } catch (error) {
+        console.error(`为设备 SN: ${SN} 查询人员列表时发生错误 (Error querying personnel list for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误查询人员列表 (Server internal error querying personnel list)' });
+    }
 });
 
 // 处理设备主动推送人员信息的请求
@@ -198,40 +235,259 @@ router.post('/DeletePeopleList', (req, res) => {
 
 // 处理设备反馈拉取人员存储结果的请求
 // @route POST /People/DownloadPeopleListResult
-// @desc 设备上报其导入一批人员后的结果（成功、失败及原因） (Device reports the results after importing a batch of personnel (success, failure, and reasons))
+// @desc 设备上报其导入一批人员后的结果（成功、失败及原因）
+// (Device reports the results after importing a batch of personnel (success, failure, and reasons))
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/DownloadPeopleListResult', (req, res) => {
-    // 从请求体中获取数据
-    // Get data from the request body
+router.post('/DownloadPeopleListResult', async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN, SuccessCount, FailCount, FailList } = req.body;
 
-    // 打印接收到的设备SN和统计信息 (用于当前阶段的调试)
-    // Print received device SN and statistics (for debugging in the current phase)
-    console.log(`设备 SN: ${SN} 反馈拉取人员存储结果。 (Device SN: ${SN} reports result of storing downloaded personnel.)`);
-    console.log(`导入成功数量 (Import success count): ${SuccessCount}, 导入失败数量 (Import fail count): ${FailCount}`);
-
-    // 如果有失败列表，并且列表不为空，则打印失败详情
-    // If FailList exists and is not empty, print failure details
-    if (FailList && FailList.length > 0) {
-        console.log(`失败详情 (${FailList.length} 条): (Failure details (${FailList.length} items):)`);
-        FailList.forEach((failItem, index) => {
-            // 打印每条失败记录的详细信息
-            // Print details of each failed record
-            console.log(`  ${index + 1}. 用户ID (User ID): ${failItem.UserID}, 错误码 (Error Code): ${failItem.ErrorCode}, 重复ID (Repeat ID): ${failItem.RepeatID || 'N/A'}, 错误信息 (Error Message): '${failItem.ErrMsg}'`);
-        });
+    if (!SN) {
+        // 如果SN为空，则返回错误 (If SN is empty, return an error)
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空 (DeviceSN cannot be empty)' });
     }
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 记录或更新这些导入结果，可能用于追踪同步状态或调试问题 (Record or update these import results, possibly for tracking synchronization status or debugging issues)
-    // 3. 对于失败的条目，可能需要标记或进行后续处理 (For failed entries, marking or subsequent processing may be required)
+    try {
+        // 打印接收到的设备SN和统计信息
+        // (Print received device SN and statistics)
+        console.log(`设备 SN: ${SN} 反馈拉取人员存储结果。 (Device SN: ${SN} reports result of storing downloaded personnel.)`);
+        console.log(`导入成功数量 (Import success count): ${SuccessCount}, 导入失败数量 (Import fail count): ${FailCount}`);
 
-    // 返回标准成功响应
-    // Return standard success response
-    res.json({
-        "Success": 1 // 1 表示操作成功 (1 means operation successful)
-    });
+        // 检查并打印失败列表详情
+        // (Check and print failure list details)
+        if (FailList && Array.isArray(FailList) && FailList.length > 0) {
+            console.log(`失败详情 (${FailList.length} 条): (Failure details (${FailList.length} items):)`);
+            FailList.forEach((failItem, index) => {
+                // 打印每条失败记录的详细信息
+                // (Print details of each failed record)
+                console.log(`  ${index + 1}. 用户ID (User ID): ${failItem.UserID}, 错误码 (Error Code): ${failItem.ErrorCode}, 重复ID (Repeat ID): ${failItem.RepeatID || 'N/A'}, 错误信息 (Error Message): '${failItem.ErrMsg}'`);
+            });
+            // TODO: 在实际数据库操作中，可以将这些失败的详细信息存储到数据库 (例如 PeopleSyncLog 集合) 以供分析。
+            // (In actual database operations, these failure details can be stored in the database (e.g., PeopleSyncLog collection) for analysis.)
+        } else if (parseInt(FailCount, 10) > 0) {
+            // 如果 FailCount 大于0 但 FailList 未提供或为空
+            // (If FailCount is greater than 0 but FailList is not provided or is empty)
+            console.log(`有 ${FailCount} 条导入失败的记录，但设备未提供详细的失败列表 (FailList)。 (There are ${FailCount} failed import records, but the device did not provide a detailed FailList.)`);
+        }
+
+        // TODO: 未来数据库交互步骤:
+        // (Future database interaction steps:)
+        // 1. 验证设备SN的合法性 (例如，查询 Device 集合)。
+        //    (Validate the legitimacy of the device SN (e.g., query Device collection).)
+        // 2. (可选) 将 SuccessCount, FailCount 以及 FailList 中的具体错误信息记录到数据库中。
+        //    可以创建一个 PeopleSyncLog 集合来存储每次同步的日志，
+        //    或者更新相关 People 文档的同步状态字段（如果适用）。
+        //    (Optionally, record SuccessCount, FailCount, and specific error messages from FailList into the database.)
+        //    (A PeopleSyncLog collection could be created to store logs of each synchronization,)
+        //    (or update synchronization status fields of relevant People documents (if applicable).)
+        // 对于当前步骤，我们仅做日志记录。
+        // (For the current step, we only perform logging.)
+
+        console.log(`已记录设备 SN: ${SN} 的人员列表下载结果日志。 (Log for personnel list download result from device SN: ${SN} has been recorded.)`);
+
+        // 返回标准成功响应
+        // (Return standard success response)
+        res.json({
+            "Success": 1 // 1 表示操作成功 (1 means operation successful)
+        });
+
+    } catch (error) {
+        // 捕获处理请求过程中的意外错误
+        // (Catch unexpected errors during request processing)
+        console.error(`处理设备 SN: ${SN} 的人员下载结果时发生错误 (Error processing personnel download result for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理人员下载结果 (Server internal error processing personnel download result)' });
+    }
+});
+
+// Helper function to map fields from personDetail (API format) to People schema format
+// (辅助函数，用于将 personDetail (API格式) 中的字段映射到 People schema 格式)
+// This is important if field names or structures differ.
+// (如果字段名称或结构不同，这一点非常重要。)
+function mapPersonDetailToSchema(detail, deviceSN) {
+    // TODO: 根据 People schema 和 detail 的实际结构实现更完善的映射。
+    // (Implement more complete mapping based on actual People schema and detail structure.)
+    // 例如，日期转换、特定默认值处理等。
+    // (For example, date conversion, specific default value handling, etc.)
+    const mapped = {
+        name: detail.Name,
+        code: detail.Code, // 人员编号 (Personnel Code)
+        job: detail.Job,
+        department: detail.Department,
+        identityCard: detail.IdentityCard,
+        attachment: detail.Attachment, // 其他信息 (Other info)
+        photo: detail.Photo, // 照片的URL或GridFS引用 (Photo URL or GridFS reference)
+        photoMD5: detail.PhotoMD5,
+        // 密码应在服务层单独处理加密，此处仅为示例 (Password should be handled for encryption at service layer, this is just an example)
+        password: detail.Password, 
+        cardNum: detail.CardNum,
+        qrCode: detail.QRCode,
+        accessType: detail.AccessType !== undefined ? detail.AccessType : 0, // 默认角色为0 (Default role is 0)
+        // 权限截止日期: API文档中 0 表示无期限。Mongoose中Date类型字段为null通常也表示无期限。
+        // (Expiration Date: In API docs, 0 means no limit. In Mongoose, null for Date type usually means no limit.)
+        expirationDate: detail.ExpirationDate === 0 || detail.ExpirationDate === "0" ? null : (detail.ExpirationDate ? new Date(parseInt(detail.ExpirationDate, 10) * 1000) : null), // 假设设备发送Unix时间戳秒级 (Assuming device sends Unix timestamp in seconds)
+        openTimes: detail.OpenTimes !== undefined ? detail.OpenTimes : 65535, // 默认65535次 (Default 65535 times)
+        keepOpen: detail.KeepOpen !== undefined ? detail.KeepOpen : false, // 默认非持续开门 (Default not keep open)
+        timegroupID: detail.Timegroup, // 注意API字段名 Timegroup, schema中是 timegroupID (Note API field name Timegroup, in schema it's timegroupID)
+        holidays: detail.Holidays,
+        elevators: detail.Elevators,
+        faceFeature: detail.FaceFeature, // 人脸特征的URL或GridFS引用 (Face feature URL or GridFS reference)
+        faceFeatureMD5: detail.FaceFeatureMD5,
+        // 指纹和掌纹数据假设设备端发送的结构与 Mongoose schema 兼容
+        // (Fingerprint and palm vein data: assuming structure sent by device is compatible with Mongoose schema)
+        fingerprints: detail.Fingerprints, 
+        palmveins: detail.Palmveins,
+        // deviceSNs: [deviceSN] // 示例：如何将当前设备SN关联。更复杂的逻辑可能需要检查数组中是否已存在此SN。
+                                // (Example: how to associate the current device SN. More complex logic might be needed to check if this SN already exists in the array.)
+    };
+
+    // 清理未定义的字段，避免将 undefined 存入数据库或覆盖已有值
+    // (Clean up undefined fields to avoid storing undefined in the database or overwriting existing values)
+    for (const key in mapped) {
+        if (mapped[key] === undefined) {
+            delete mapped[key];
+        }
+    }
+    
+    return mapped;
+}
+
+
+// 处理设备主动推送人员信息的请求
+// @route POST /People/PushPeople
+// @desc 设备在本地新增、修改或删除人员时，或响应服务器查询指令时，主动推送人员信息到平台
+// (Device actively pushes personnel information to the platform when adding, modifying, or deleting personnel locally, or in response to a server query command)
+// @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
+router.post('/PushPeople', peopleUpload, async (req, res) => {
+    const { SN, PushType, UserID, Detail } = req.body;
+    // const photoFile = (req.files && req.files.Photo) ? req.files.Photo[0] : null; // 照片文件处理已延后 (Photo file handling deferred)
+
+    if (!SN || !PushType || !UserID) {
+        return res.status(400).json({ Success: 0, Message: '设备SN, PushType, 和 UserID 不能为空 (DeviceSN, PushType, and UserID cannot be empty)' });
+    }
+
+    const pushTypeInt = parseInt(PushType, 10);
+    if (isNaN(pushTypeInt) || ![1, 2, 3, 4].includes(pushTypeInt)) {
+        return res.status(400).json({ Success: 0, Message: '无效的 PushType 值 (Invalid PushType value)' });
+    }
+
+    let personDetail = null;
+    if (Detail) {
+        try {
+            personDetail = JSON.parse(Detail);
+        } catch (e) {
+            console.error(`设备 SN: ${SN}, UserID: ${UserID}, 解析人员详情JSON失败 (Failed to parse personnel detail JSON):`, e);
+            return res.status(400).json({ Success: 0, Message: '人员详情 (Detail) JSON 格式错误 (Personnel detail (Detail) JSON format error)' });
+        }
+    } else if (pushTypeInt !== 3) { // 删除(3)操作可能没有Detail字段 (Delete (3) operation might not have Detail field)
+        // 对于新增(1)、更新(2)、查询响应(4)，Detail通常是需要的
+        // (For Add(1), Update(2), Query Response(4), Detail is usually needed)
+        // 但API文档说"人员不存在时，则无此字段"，这可能适用于查询响应(4)
+        // (But API docs say "if personnel does not exist, this field is absent", which might apply to Query Response(4))
+        // 如果是新增或更新，但没有Detail，则应报错
+        // (If it's Add or Update without Detail, an error should be returned)
+        if (pushTypeInt === 1 || pushTypeInt === 2) {
+            console.log(`设备 SN: ${SN}, UserID: ${UserID}, PushType ${pushTypeInt} 需要 Detail 字段但未提供。 (PushType ${pushTypeInt} requires Detail field but not provided.)`);
+            return res.status(400).json({ Success: 0, Message: '新增/更新操作缺少人员详情 (Detail) (Add/Update operation missing personnel detail (Detail))' });
+        }
+        console.log(`设备 SN: ${SN}, UserID: ${UserID}, PushType ${pushTypeInt} 无 Detail 字段。 (PushType ${pushTypeInt} has no Detail field.)`);
+    }
+    
+    console.log(`设备 SN: ${SN} 推送人员信息。类型: ${pushTypeInt}, 用户ID: ${UserID}。 (Device SN: ${SN} pushing personnel info. Type: ${pushTypeInt}, UserID: ${UserID}.)`);
+
+    try {
+        let message = "";
+        // 假设 UserID 在特定设备下是唯一的，或者 userID 本身是平台生成的全局唯一ID
+        // (Assuming UserID is unique under a specific device, or userID itself is a platform-generated globally unique ID)
+        // 如果 UserID 是设备本地ID，查询时应结合 SN: { userID: UserID, deviceSNs: SN }
+        // (If UserID is a local device ID, query should combine SN: { userID: UserID, deviceSNs: SN })
+        // 为简化，当前示例主要基于 UserID 操作，deviceSNs 的管理需要在 mapPersonDetailToSchema 和具体case中细化
+        // (For simplicity, current example mainly operates based on UserID; deviceSNs management needs to be detailed in mapPersonDetailToSchema and specific cases)
+        const query = { userID: UserID }; 
+
+        switch (pushTypeInt) {
+            case 1: // 新增 (Add)
+                if (!personDetail) return res.status(400).json({ Success: 0, Message: '新增操作缺少人员详情 (Detail) (Add operation missing personnel detail (Detail))' });
+                
+                let existingPerson = await People.findOne(query);
+                if (existingPerson) {
+                    console.log(`设备 SN: ${SN}, UserID: ${UserID} 已存在，将执行更新逻辑。 (UserID ${UserID} already exists, will perform update logic.)`);
+                    // 如果已存在，则执行类似 case 4 (查询响应/Upsert) 的逻辑
+                    // (If exists, perform logic similar to case 4 (Query Response/Upsert))
+                    const updateData = mapPersonDetailToSchema(personDetail, SN);
+                    // 确保 deviceSNs 数组包含当前 SN
+                    // (Ensure deviceSNs array includes current SN)
+                    updateData.$addToSet = { deviceSNs: SN }; // 使用 $addToSet 避免重复添加 (Use $addToSet to avoid duplicate additions)
+                    await People.findOneAndUpdate(query, updateData, { upsert: true, new: true, setDefaultsOnInsert: true });
+                    message = `人员 ${UserID} 已存在，信息已更新/同步。 (Personnel ${UserID} already exists, information updated/synchronized.)`;
+                } else {
+                    const newPersonData = mapPersonDetailToSchema(personDetail, SN);
+                    newPersonData.userID = UserID; // 确保 UserID 被设置 (Ensure UserID is set)
+                    newPersonData.deviceSNs = [SN]; // 初始关联到当前设备 (Initially associate with current device)
+                    
+                    const newPerson = new People(newPersonData);
+                    await newPerson.save();
+                    message = `新增人员 ${UserID} 成功。 (Successfully added personnel ${UserID}.)`;
+                }
+                break;
+
+            case 2: // 更新 (Update)
+                if (!personDetail) return res.status(400).json({ Success: 0, Message: '更新操作缺少人员详情 (Detail) (Update operation missing personnel detail (Detail))' });
+                
+                const updatedDataForUpdate = mapPersonDetailToSchema(personDetail, SN);
+                // 确保 deviceSNs 数组包含当前 SN (如果设备推送的人员信息需要关联到此设备)
+                // (Ensure deviceSNs array includes current SN (if personnel info pushed by device needs to be associated with this device))
+                updatedDataForUpdate.$addToSet = { deviceSNs: SN };
+                
+                const updatedPerson = await People.findOneAndUpdate(query, updatedDataForUpdate, { new: true });
+                if (!updatedPerson) {
+                    // 如果严格要求人员必须已存在才能更新，则返回404
+                    // (If strictly requiring personnel to exist for update, return 404)
+                    // 或者，如果希望如果不存在则创建，则可以使用 upsert:true (类似 case 4)
+                    // (Alternatively, if wanting to create if not exists, use upsert:true (similar to case 4))
+                    console.log(`设备 SN: ${SN}, UserID: ${UserID} 未找到，无法更新。 (UserID ${UserID} not found, cannot update.)`);
+                    return res.status(404).json({ Success: 0, Message: `用户ID ${UserID} 未找到，无法更新 (UserID ${UserID} not found, cannot update)` });
+                }
+                message = `更新人员 ${UserID} 成功。 (Successfully updated personnel ${UserID}.)`;
+                break;
+
+            case 3: // 删除 (Delete)
+                // 注意: "删除" 可能意味着从特定设备解除关联，或全局删除。
+                // (Note: "Delete" might mean disassociating from a specific device, or global deletion.)
+                // 当前实现为全局删除。如果需要解除关联，应使用 $pull 从 deviceSNs 数组移除 SN。
+                // (Current implementation is global delete. If disassociation is needed, use $pull to remove SN from deviceSNs array.)
+                const deletedPerson = await People.findOneAndDelete(query);
+                if (!deletedPerson) {
+                    console.log(`设备 SN: ${SN}, UserID: ${UserID} 未找到，无法删除。 (UserID ${UserID} not found, cannot delete.)`);
+                    return res.status(404).json({ Success: 0, Message: `用户ID ${UserID} 未找到，无法删除 (UserID ${UserID} not found, cannot delete)` });
+                }
+                message = `删除人员 ${UserID} 成功。 (Successfully deleted personnel ${UserID}.)`;
+                break;
+
+            case 4: // 查询响应 (设备主动上报查询到的人员信息) - 执行 Upsert 逻辑
+                    // (Query Response (device actively reports queried personnel info) - Perform Upsert logic)
+                if (!personDetail) {
+                     console.log(`设备 SN: ${SN}, UserID: ${UserID} 的查询响应无人员详情，可能设备本地无此人。不执行数据库操作。 (Query response for UserID ${UserID} has no personnel detail, possibly person not on device locally. No DB operation performed.)`);
+                     message = `收到对 UserID ${UserID} 的查询响应，无详情提供。 (Received query response for UserID ${UserID}, no detail provided.)`;
+                } else {
+                    const upsertData = mapPersonDetailToSchema(personDetail, SN);
+                    // 确保 deviceSNs 数组包含当前 SN
+                    // (Ensure deviceSNs array includes current SN)
+                    upsertData.$addToSet = { deviceSNs: SN };
+                    await People.findOneAndUpdate(query, upsertData, { upsert: true, new: true, setDefaultsOnInsert: true });
+                    message = `处理对 UserID ${UserID} 的查询响应并已同步/创建。 (Processed query response for UserID ${UserID} and synchronized/created.)`;
+                }
+                break;
+            default:
+                // 此处理论上不会到达，因为 pushTypeInt 已被验证
+                // (Theoretically unreachable as pushTypeInt is already validated)
+                return res.status(500).json({ Success: 0, Message: '内部错误：未知的 PushType (Internal error: Unknown PushType)' }); 
+        }
+        console.log(`设备 SN: ${SN} - ${message}`);
+        res.json({ Success: 1, Message: message });
+
+    } catch (error) {
+        console.error(`设备 SN: ${SN}, 处理 PushPeople (UserID: ${UserID}, Type: ${pushTypeInt}) 时发生错误 (Error processing PushPeople):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理人员推送 (Server internal error processing personnel push)' });
+    }
 });
 
 // 导出路由模块

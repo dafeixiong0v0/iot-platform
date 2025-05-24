@@ -45,8 +45,18 @@ const recordRoutes = require('./api/recordRoutes');
 // All paths under /Record will be handled by recordRoutes
 app.use('/Record', recordRoutes);
 
-// TODO: 在后续步骤中，这里将挂载其他路由模块 (例如系统记录等)
-// In later steps, other route modules will be mounted here (e.g., system records, etc.).
+// 导入内部管理相关的路由模块
+// Import internal management related route modules
+const internalRoutes = require('./api/internalRoutes');
+
+// 挂载内部管理路由
+// Mount internal management routes
+// 所有 /internal 下的路径都将由 internalRoutes 处理
+// All paths under /internal will be handled by internalRoutes
+app.use('/internal', internalRoutes);
+
+// TODO: 在后续步骤中，这里将挂载其他路由模块
+// In later steps, other route modules will be mounted here.
 
 // 导出 Express 应用实例，以便在 server.js 中使用
 // Export the Express app instance for use in server.js

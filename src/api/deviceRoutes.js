@@ -5,6 +5,13 @@ const express = require('express');
 // Create a router instance
 const router = express.Router();
 
+// 导入 Mongoose 模型
+// Import Mongoose models
+const Device = require('../models/device'); // 引入Device模型 (Import Device model)
+const DeviceStatus = require('../models/deviceStatus'); // 引入DeviceStatus模型 (Import DeviceStatus model)
+const People = require('../models/people'); // 引入People模型 (Import People model)
+const RemoteCommandQueue = require('../models/remoteCommandQueue'); // 引入RemoteCommandQueue模型 (Import RemoteCommandQueue model)
+
 // 导入 multer 用于处理 multipart/form-data
 // Import multer for handling multipart/form-data
 const multer = require('multer');
@@ -26,97 +33,228 @@ const uploadAuthRequest = multer().fields([
 ]);
 
 // 处理设备心跳包请求
-// Handle device keepalive requests
 // @route POST /Device/Keepalive
-// @desc 设备发送心跳以保持连接并检查指令 (Device sends keepalive to maintain connection and check for commands)
+// @desc 设备发送心跳以保持连接、更新状态并检查指令
+// (Device sends keepalive to maintain connection, update status, and check for commands)
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/Keepalive', (req, res) => {
-    // 从请求体中获取设备数据
-    // Get device data from the request body
+router.post('/Keepalive', async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN, RelayStatus, KeepOpenStatus, DoorSensorStatus, LockDoorStatus, AlarmStatus } = req.body;
     
-    // 打印接收到的设备SN和状态 (用于当前阶段的调试)
-    // Print received device SN and status (for debugging in the current phase)
-    console.log(`接收到心跳来自设备 SN (Received keepalive from device SN): ${SN}`);
-    console.log(`设备状态 (Device status): RelayStatus=${RelayStatus}, KeepOpenStatus=${KeepOpenStatus}, DoorSensorStatus=${DoorSensorStatus}, LockDoorStatus=${LockDoorStatus}, AlarmStatus='${AlarmStatus}'`);
+    // 获取设备上报的IP地址
+    // Get IP address reported by the device
+    // 注意: req.ip 依赖 Express 的 'trust proxy' 设置, req.connection?.remoteAddress 更原始
+    // (Note: req.ip depends on Express 'trust proxy' setting, req.connection?.remoteAddress is more raw)
+    // 简化处理，直接从请求中获取，或由反向代理设置到header中
+    // (Simplified handling, get directly from request, or set in header by reverse proxy)
+    let clientIp = req.headers['x-forwarded-for'] || req.connection?.remoteAddress;
+    if (clientIp && clientIp.includes(',')) { // 如果有多个代理，取第一个 (If multiple proxies, take the first one)
+        clientIp = clientIp.split(',')[0].trim();
+    }
+    if (clientIp && (clientIp.startsWith('::ffff:') || clientIp.startsWith('::1'))) { // 处理IPv6环回/映射地址 (Handle IPv6 loopback/mapped address)
+        clientIp = clientIp.replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+    }
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 更新数据库中的设备在线状态和最后心跳时间 (DeviceStatus 集合) (Update device online status and last keepalive time in the database (DeviceStatus collection))
-    // 3. 查询 RemoteCommandQueue 集合中是否有针对此SN的待处理指令 (Query the RemoteCommandQueue collection for pending commands for this SN)
-    // 4. 根据查询结果动态设置 AddPeople, DeletePeople, SyncParameter, Remote, UploadWorkParameter 的值 (Dynamically set the values of AddPeople, DeletePeople, SyncParameter, Remote, UploadWorkParameter based on query results)
+    // 校验SN是否存在
+    // Validate if SN exists
+    if (!SN) {
+        console.log('设备心跳请求失败: SN为空。请求来源IP: (Device keepalive request failed: SN is empty. Request source IP:)', clientIp, '请求体 (Request body):', req.body);
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空' }); // Device SN cannot be empty
+    }
 
-    // 返回标准响应
-    // Return standard response
-    res.json({
-        "Success": 1, // 1:成功 (1: Success)
-        "AddPeople": 0, // >0--表示有需要添加人员到设备 (>0 -- means there are people to add to the device)
-        "DeletePeople": 0, // >0--表示需要从设备删除人员 (>0 -- means people need to be deleted from the device)
-        "SyncParameter": 0, // 1--表示有参数需要设置到设备 (1 -- means parameters need to be set to the device)
-        "Remote": 0, // 1--表示有远程操作需要处理 (1 -- means remote operations need to be processed)
-        "UploadWorkParameter": 0 // 1--表示要求设备上传设备工作参数 (1 -- means the device is required to upload work parameters)
-    });
+    try {
+        // 查找或创建设备记录
+        // (Find or create device record)
+        // 使用 findOneAndUpdate 的 upsert 功能简化查找或创建
+        // (Use findOneAndUpdate's upsert feature to simplify find or create)
+        const device = await Device.findOneAndUpdate(
+            { deviceSN: SN }, // 查询条件 (Query condition)
+            { $setOnInsert: { deviceSN: SN, ipAddress: clientIp, deviceName: `Device_${SN}` } }, // $setOnInsert 仅在文档创建时设置这些值 (仅在创建时设置ipAddress和deviceName)
+                                                                                             // ($setOnInsert only sets these values when the document is created - only set ipAddress and deviceName on creation)
+            { upsert: true, new: true, setDefaultsOnInsert: true } // 选项: 找不到则创建, 返回更新后的文档, 创建时应用默认值
+                                                                  // (Options: create if not found, return updated document, apply defaults on creation)
+        );
+        console.log(`设备 SN: ${SN} 心跳处理 - 设备记录已确认/创建 (Device SN: ${SN} keepalive processed - Device record confirmed/created).`);
+
+        // 更新或创建设备状态记录
+        // (Update or create device status record)
+        const deviceStatusUpdate = {
+            deviceSN: SN,
+            onlineStatus: true,
+            lastKeepaliveAt: new Date(),
+            ipAddress: clientIp, // 记录本次心跳的IP地址 (Record IP address of this keepalive)
+            RelayStatus,
+            KeepOpenStatus,
+            DoorSensorStatus,
+            LockDoorStatus,
+            AlarmStatus
+        };
+        await DeviceStatus.findOneAndUpdate(
+            { deviceSN: SN }, // 查询条件 (Query condition)
+            deviceStatusUpdate, // 更新内容 (Update content)
+            { upsert: true, new: true, setDefaultsOnInsert: true } // 选项 (Options)
+        );
+        console.log(`设备 SN: ${SN} 的状态已更新。在线状态: true, IP: ${clientIp} (Device SN: ${SN} status updated. Online status: true, IP: ${clientIp})`);
+        // 原始状态打印，用于调试 (Original status print for debugging)
+        // console.log(`  设备状态: RelayStatus=${RelayStatus}, KeepOpenStatus=${KeepOpenStatus}, DoorSensorStatus=${DoorSensorStatus}, LockDoorStatus=${LockDoorStatus}, AlarmStatus='${AlarmStatus}'`);
+
+        // 检查待处理的远程命令
+        // (Check for pending remote commands)
+        let syncParameterFlag = 0;
+        let remoteCommandFlag = 0;
+
+        // 查询 RemoteCommandQueue 集合中是否有针对此SN的待处理指令
+        // (Query the RemoteCommandQueue collection for pending commands for this SN)
+        const pendingCommands = await RemoteCommandQueue.find({ 
+            deviceSN: SN, 
+            status: 'Pending'  // 仅查找状态为 'Pending' 的命令 (Only find commands with status 'Pending')
+        }).sort({ priority: -1, createdAt: 1 }).lean(); // 按优先级高到低，然后按创建时间先到先执行
+                                                        // (Sort by priority high to low, then by creation time first to execute)
+
+        if (pendingCommands && pendingCommands.length > 0) {
+            console.log(`设备 SN: ${SN} 发现 ${pendingCommands.length} 条待处理命令。 (Device SN: ${SN} found ${pendingCommands.length} pending commands.)`);
+            for (const cmd of pendingCommands) {
+                if (cmd.commandType === 'SyncParameter') {
+                    syncParameterFlag = 1;
+                    console.log(`设备 SN: ${SN} - 检测到待处理的 SyncParameter 命令。 (Detected pending SyncParameter command.)`);
+                } else {
+                    // 任何其他类型的命令都通过 Remote:1 标志，由 /Device/RemoteCommand 接口处理
+                    // (Any other type of command is indicated by Remote:1 flag, handled by /Device/RemoteCommand interface)
+                    remoteCommandFlag = 1;
+                    console.log(`设备 SN: ${SN} - 检测到待处理的 ${cmd.commandType} 命令，将通过 RemoteCommand 处理。 (Detected pending ${cmd.commandType} command, will be processed via RemoteCommand.)`);
+                }
+                // 如果只需要知道是否有这两种类型的命令，可以提前跳出循环
+                // (If only need to know if these two types of commands exist, can break the loop early)
+                if (syncParameterFlag === 1 && remoteCommandFlag === 1) break; 
+            }
+        } else {
+            console.log(`设备 SN: ${SN} 无待处理的远程命令。 (Device SN: ${SN} has no pending remote commands.)`);
+        }
+
+        // 返回标准响应，包含命令标志
+        // (Return standard response, including command flags)
+        res.json({
+            "Success": 1,
+            "AddPeople": 0, // TODO: 此标志可能基于人员同步状态而非RemoteCommandQueue (This flag might be based on personnel sync status, not RemoteCommandQueue)
+            "DeletePeople": 0, // TODO: 此标志可能基于人员同步状态而非RemoteCommandQueue (This flag might be based on personnel sync status, not RemoteCommandQueue)
+            "SyncParameter": syncParameterFlag,
+            "Remote": remoteCommandFlag,
+            "UploadWorkParameter": 0 // TODO: 如果需要，也可以通过命令队列触发此操作 (If needed, this operation can also be triggered via command queue)
+        });
+
+    } catch (error) {
+        console.error(`处理设备 SN: ${SN} 的心跳时发生错误 (Error processing keepalive for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理心跳' }); // Server internal error processing keepalive
+    }
 });
 
 // 处理设备在线鉴权请求
 // @route POST /Device/RequestAuthorization
-// @desc 设备请求服务器进行实时在线鉴权 (例如：开门请求) (Device requests real-time online authorization from the server (e.g., door open request))
+// @desc 设备请求服务器进行实时在线鉴权 (例如：开门请求)
+// (Device requests real-time online authorization from the server (e.g., door open request))
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/RequestAuthorization', uploadAuthRequest, (req, res) => {
-    // 从请求体和文件获取数据
-    // Get data from request body and files
+router.post('/RequestAuthorization', uploadAuthRequest, async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN, RecordDetail } = req.body;
-    const photoFile = (req.files && req.files.Photo) ? req.files.Photo[0] : null;
+    // const photoFile = (req.files && req.files.Photo) ? req.files.Photo[0] : null; // 照片文件处理已延后 (Photo file handling deferred)
 
-    // 打印接收到的设备SN (用于当前阶段的调试)
-    // Print received device SN (for debugging in the current phase)
-    console.log(`设备 SN: ${SN} 发起在线鉴权请求。 (Device SN: ${SN} initiates online authorization request.)`);
+    if (!SN || !RecordDetail) {
+        // 如果SN或记录详情为空，则返回错误 (If SN or record detail is empty, return an error)
+        return res.status(400).json({ Success: 0, Message: '设备SN和记录详情不能为空 (DeviceSN and RecordDetail cannot be empty)' });
+    }
 
-    let recordDetailJson = {};
-    if (RecordDetail) {
-        try {
-            // 注意：文档提到 RecordDetail 内容可能经过gzip压缩。此处暂时假定为普通JSON字符串。
-            // Gzip 解压逻辑可以在后续步骤中添加。
-            // Note: The document mentions that RecordDetail content might be gzip compressed. Here, we temporarily assume it's a plain JSON string.
-            // Gzip decompression logic can be added in subsequent steps.
-            recordDetailJson = JSON.parse(RecordDetail);
-            // 打印部分鉴权记录详情
-            // Print partial authorization record details
-            console.log(`鉴权记录详情: RecordID=${recordDetailJson.RecordID}, RecordType=${recordDetailJson.RecordType}, UserID=${recordDetailJson.UserID || 'N/A'}`);
-        } catch (error) {
-            console.error("解析鉴权记录详情 (RecordDetail) JSON 字符串失败 (Failed to parse authorization record detail (RecordDetail) JSON string):", error);
-            // 在实际应用中，可能需要返回错误响应，例如：
-            // In a real application, an error response might be needed, e.g.:
-            // return res.status(400).json({ Success: 0, Message: "记录详情格式错误 (Record detail format error)" });
+    let recordDetailJson;
+    try {
+        recordDetailJson = JSON.parse(RecordDetail);
+    } catch (e) {
+        console.error(`设备 SN: ${SN}, 解析鉴权记录详情JSON失败 (Failed to parse authorization record detail JSON):`, e);
+        return res.status(400).json({ Success: 0, Message: '记录详情 (RecordDetail) JSON 格式错误 (RecordDetail JSON format error)' });
+    }
+
+    // 从解析后的JSON中获取 UserID, CardNum, RecordType 等信息
+    // (Get UserID, CardNum, RecordType, etc. from parsed JSON)
+    const { UserID, CardNum, RecordType } = recordDetailJson; 
+    console.log(`设备 SN: ${SN} 在线鉴权请求: UserID='${UserID || 'N/A'}', CardNum='${CardNum || 'N/A'}', RecordType=${RecordType}`);
+
+    try {
+        let personQuery = {};
+        // 构建人员查询条件
+        // (Build personnel query condition)
+        // TODO: 考虑 UserID 和 CardNum 的唯一性以及是否需要与 deviceSNs 关联查询
+        // (TODO: Consider uniqueness of UserID and CardNum and whether to query in association with deviceSNs)
+        // 例如: 如果 UserID 是设备本地ID, 查询应为 { userID: UserID, deviceSNs: SN }
+        // (For example: if UserID is a local device ID, query should be { userID: UserID, deviceSNs: SN })
+        if (UserID) {
+            personQuery = { userID: UserID };
+        } else if (CardNum) {
+            personQuery = { cardNum: CardNum };
+        } else {
+            // 如果既没有UserID也没有CardNum，则无法进行人员查找
+            // (If neither UserID nor CardNum is provided, personnel lookup cannot be performed)
+            return res.status(400).json({ Success: 0, Message: '鉴权请求中缺少UserID或CardNum (Missing UserID or CardNum in authorization request)' });
         }
-    } else {
-        console.log("请求中未找到鉴权记录详情 (RecordDetail) 字段。 (Authorization record detail (RecordDetail) field not found in request.)");
-        // 根据需求，如果 RecordDetail 是必需的，可以返回错误
-        // Depending on requirements, if RecordDetail is mandatory, an error can be returned
-        // return res.status(400).json({ Success: 0, Message: "缺少记录详情 (Missing record detail)" });
+
+        // 查询人员信息
+        // (Query personnel information)
+        const person = await People.findOne(personQuery).lean(); // 使用 .lean() 获取普通JS对象 (Use .lean() to get plain JS object)
+
+        if (!person) {
+            // 如果未找到人员
+            // (If person not found)
+            // TODO: 根据 RecordType 判断是否需要记录为“未注册用户”事件到 IdentifyRecord 集合
+            // (TODO: Based on RecordType, determine if it needs to be recorded as an "unregistered user" event in IdentifyRecord collection)
+            console.log(`设备 SN: ${SN}, 鉴权失败: 人员未注册 (UserID: ${UserID || 'N/A'}, CardNum: ${CardNum || 'N/A'})。 (Auth failed: Person not registered.)`);
+            return res.json({ Success: 0, Message: '人员未注册 (Person not registered)' });
+        }
+
+        // 1. 检查黑名单 (Check blacklist)
+        if (person.accessType === 2) { // 2 表示黑名单 (2 means blacklist)
+            console.log(`设备 SN: ${SN}, 鉴权失败: 人员 ${person.name} (UserID: ${person.userID}) 在黑名单中。 (Auth failed: Person ${person.name} is blacklisted.)`);
+            return res.json({ Success: 0, Message: '黑名单人员，禁止通行 (Blacklisted, access denied)' });
+        }
+        
+        // 2. 检查有效期 (0 或 null 表示无期限) (Check expiration date - 0 or null means no limit)
+        if (person.expirationDate && new Date(person.expirationDate) < new Date()) {
+            console.log(`设备 SN: ${SN}, 鉴权失败: 人员 ${person.name} (UserID: ${person.userID}) 权限已过期 (${person.expirationDate})。 (Auth failed: Person ${person.name}'s permission expired.)`);
+            return res.json({ Success: 0, Message: '权限已过期 (Permission expired)' });
+        }
+
+        // 3. 检查开门次数 (0 表示禁止通行, 65535 表示无限制) (Check open times - 0 means prohibited, 65535 means unlimited)
+        if (person.openTimes === 0) {
+            console.log(`设备 SN: ${SN}, 鉴权失败: 人员 ${person.name} (UserID: ${person.userID}) 有效次数已用尽。 (Auth failed: Person ${person.name}'s open times exhausted.)`);
+            return res.json({ Success: 0, Message: '有效次数已用尽 (Open times exhausted)' });
+        }
+        // TODO: 如果 openTimes 不是65535 (无限制)，并且本次验证通过，则需要将 openTimes 减1。
+        // (If openTimes is not 65535 (unlimited) and this verification passes, openTimes needs to be decremented by 1.)
+        // 例如: if (person.openTimes < 65535) { await People.updateOne(personQuery, { $inc: { openTimes: -1 } }); }
+        // (For example: if (person.openTimes < 65535) { await People.updateOne(personQuery, { $inc: { openTimes: -1 } }); })
+        // 这需要考虑并发和事务性，或者接受最终一致性。当前步骤暂不实现减次数。
+        // (This needs to consider concurrency and atomicity, or accept eventual consistency. Decrementing times is not implemented in the current step.)
+
+        // 4. TODO: 检查开门时段 (Timegroup) 和节假日 (Holidays)
+        // (TODO: Check door open time slots (Timegroup) and holidays (Holidays))
+        // 这部分逻辑较复杂，需要解析 Timegroup 字符串 (例如 "0,0,0,0,0,0,0,1,0800,1700,0800,1700,0800,1700,0800,1700,0800,1700,0800,1700,0800,1700")
+        // (This part is complex, requiring parsing of Timegroup string (e.g., "0,0,0,0,0,0,0,1,0800,1700,..."))
+        // 并与当前时间比较，同时检查 Holidays 列表。
+        // (and comparing with current time, while also checking Holidays list.)
+        // 示例: const accessGrantedByTime = checkTimegroup(person.timegroupID, person.holidays, new Date());
+        // (Example: const accessGrantedByTime = checkTimegroup(person.timegroupID, person.holidays, new Date());)
+        // if (!accessGrantedByTime) {
+        //     console.log(`设备 SN: ${SN}, 鉴权失败: 人员 ${person.name} (UserID: ${person.userID}) 不在授权时间范围内。`);
+        //     return res.json({ Success: 0, Message: '不在授权时间范围内 (Not within authorized time range)' });
+        // }
+        console.log(`人员 ${person.name} (UserID: ${person.userID}, CardNum: ${person.cardNum || 'N/A'}) 通过了基础验证。时段和节假日检查暂未实现。 (Person passed basic checks. Time slot and holiday checks not yet implemented.)`);
+
+        // 如果所有检查都通过 (If all checks pass)
+        // Success: 1 表示鉴权成功，开门并显示鉴权消息
+        // Success: 2 表示鉴权成功，开门但不显示消息 (例如，对于已授权的常开卡)
+        // (Success: 1 means auth successful, open door and display message)
+        // (Success: 2 means auth successful, open door but do not display message (e.g., for authorized keep-open card))
+        // 当前默认返回 Success: 1 (Currently defaults to Success: 1)
+        res.json({ Success: 1, Message: `验证通过: ${person.name || ''} (Verification successful: ${person.name || ''})` });
+
+    } catch (error) {
+        console.error(`设备 SN: ${SN}, 处理在线鉴权时发生错误 (Error processing online authorization for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理在线鉴权 (Server internal error processing online authorization)' });
     }
-
-    if (photoFile) {
-        console.log(`上传了鉴权现场照片 (Uploaded authorization site photo): ${photoFile.originalname}, 大小 (Size): ${photoFile.size} bytes`);
-        // TODO: 在后续步骤中，这里将包含照片文件的处理逻辑，例如保存到 GridFS 或文件系统，并与鉴权记录关联
-        // In subsequent steps, this will include logic for handling the photo file, e.g., saving to GridFS or filesystem, and associating it with the authorization record.
-    }
-
-    // TODO: 在后续步骤中，这里将包含核心的鉴权逻辑:
-    // In subsequent steps, this will include the core authorization logic:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 解析 RecordDetail 中的信息 (UserID, RecordType, CardNum, QRCode等) (Parse information from RecordDetail (UserID, RecordType, CardNum, QRCode, etc.))
-    // 3. 查询 People 集合，检查人员是否存在、权限是否有效 (有效期、开门次数、时段、节假日等) (Query People collection, check if personnel exists and if permissions are valid (expiration date, door open times, time slots, holidays, etc.))
-    // 4. 查询 Device 集合或相关规则，检查设备状态或特定门禁规则 (Query Device collection or related rules, check device status or specific access control rules)
-    // 5. 根据综合判断，返回相应的 Success 值 (0-拒绝, 1-允许并显示消息, 2-允许不显示消息) 和 Message (Based on comprehensive judgment, return corresponding Success value (0-reject, 1-allow and display message, 2-allow and do not display message) and Message)
-
-    // 当前默认返回允许操作并显示消息
-    // Currently defaults to allowing operation and displaying a message
-    res.json({
-        "Success": 1, // 1 = 鉴权成功，开门并显示鉴权消息 (1 = Authorization successful, open door and display authorization message)
-        "Message": "允许操作 (平台默认)" // 可选的提示信息 (Optional informational message)
-    });
 });
 
 // 处理设备反馈人员注册凭证的结果
@@ -219,98 +357,246 @@ router.post('/UploadSnapshoot', uploadSnapshoot, (req, res) => {
 
 // 处理设备获取远程操作指令的请求
 // @route POST /Device/RemoteCommand
-// @desc 设备在收到心跳包中 Remote=1 指令后，请求此接口获取具体的远程操作命令 (After receiving Remote=1 in heartbeat, device requests this interface for specific remote commands)
+// @desc 设备在收到心跳包中 Remote=1 指令后，请求此接口获取具体的远程操作命令
+// (After receiving Remote=1 in heartbeat, device requests this interface for specific remote commands)
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/RemoteCommand', (req, res) => {
-    // 从请求体中获取设备SN
-    // Get device SN from the request body
+router.post('/RemoteCommand', async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN } = req.body;
 
-    // 打印接收到的设备SN (用于当前阶段的调试)
-    // Print received device SN (for debugging in the current phase)
+    if (!SN) {
+        // 如果SN为空，则返回错误 (If SN is empty, return an error)
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空 (DeviceSN cannot be empty)' });
+    }
     console.log(`设备 SN: ${SN} 请求远程操作指令。 (Device SN: ${SN} requests remote operation command.)`);
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 查询 RemoteCommandQueue 集合中是否有针对此SN的待执行指令 (Query RemoteCommandQueue for pending commands for this SN)
-    // 3. 如果有指令，则构建相应的指令JSON对象返回给设备 (If commands exist, construct and return the command JSON to the device)
-    // 4. 更新指令在队列中的状态 (例如，从未发送变为已发送) (Update command status in the queue, e.g., from pending to sent)
+    try {
+        // 查找优先级最高的一条待处理命令
+        // (Find the pending command with the highest priority)
+        const commandToExecute = await RemoteCommandQueue.findOne({
+            deviceSN: SN,
+            status: 'Pending' // 仅查找状态为 'Pending' 的命令 (Only find commands with status 'Pending')
+        }).sort({ priority: -1, createdAt: 1 }); // 按优先级高到低，然后按创建时间先到先执行
+                                                 // (Sort by priority high to low, then by creation time first to execute)
 
-    // 默认返回无待处理指令的响应
-    // Default response indicating no pending commands
-    res.json({
-        "Success": 1, // 1 表示成功 (1 means success)
-        "Message": "当前无待处理的远程操作指令" // 提示信息，可选 (Informational message, optional)
-        // "Restart": 0, // 远程重启: 0:不重启, 1:重启 (示例：无重启指令) (Remote restart: 0: no restart, 1: restart (Example: no restart command))
-        // "Opendoor": 0 // 远程开门: 0:不处理 (示例：无开门指令) (Remote open door: 0: do not process (Example: no open door command))
-    });
+        if (commandToExecute) {
+            console.log(`设备 SN: ${SN} - 发现待执行命令: ${commandToExecute.commandType}, Payload: ${JSON.stringify(commandToExecute.commandPayload)}`);
+            // (Device SN: ${SN} - Found pending command: ${commandToExecute.commandType}, Payload: ${JSON.stringify(commandToExecute.commandPayload)})
+
+            const responsePayload = { Success: 1 };
+            const payload = commandToExecute.commandPayload || {}; // 确保 payload 至少是一个空对象 (Ensure payload is at least an empty object)
+
+            // 根据命令类型构建特定的响应字段
+            // (Construct specific response fields based on command type)
+            // 参考HTTPv2文档 "API-远程操作指令" -> "返回值参数说明" 部分
+            // (Refer to HTTPv2 documentation "API-Remote Operation Commands" -> "Return Value Parameter Description" section)
+            switch (commandToExecute.commandType) {
+                case 'Restart': // 远程重启 (Remote Restart)
+                    responsePayload.Restart = payload.value !== undefined ? payload.value : 1; // payload: { "value": 1 } or default to 1
+                    break;
+                case 'Recover': // 恢复出厂 (Factory Reset)
+                    responsePayload.Recover = payload.value !== undefined ? payload.value : 1;
+                    break;
+                case 'Opendoor': // 远程开门 (Remote Open Door)
+                    // payload 可以是直接的整数值，或者类似 { "value": 1 } 的对象
+                    // (payload can be a direct integer value, or an object like { "value": 1 })
+                    // API文档示例中是 "Opendoor: 1"，我们假设如果指定了payload则使用其值
+                    // (API documentation example is "Opendoor: 1", we assume if payload is specified, its value is used)
+                    responsePayload.Opendoor = payload.value !== undefined ? payload.value : 1; 
+                    break;
+                case 'Closealarm': // 关闭报警 (Close Alarm)
+                    responsePayload.Closealarm = payload.value !== undefined ? payload.value : 1;
+                    break;
+                case 'RepostRecord': // 重新上传记录 (Re-upload Records)
+                     responsePayload.RepostRecord = payload.value !== undefined ? payload.value : 1;
+                     break;
+                case 'PushAllPeople': // 要求上传所有人员 (Request Upload All Personnel)
+                    responsePayload.PushAllPeople = payload.value !== undefined ? payload.value : 1;
+                    break;
+                case 'QueryPeople': // 要求上传指定用户号的人员 (Request Upload Specified Personnel)
+                    responsePayload.QueryPeople = payload.userIDs || []; // payload: { "userIDs": [1,2,3] }
+                    break;
+                case 'ClearRecord': // 删除所有记录 (Delete All Records)
+                    responsePayload.ClearRecord = payload.value !== undefined ? payload.value : 1;
+                    break;
+                case 'RegisterIdentifyTicket': // 在设备上注册凭证类型 (Register Credential Type on Device)
+                    responsePayload.RegisterIdentifyTicket = payload; // payload: { RegisterType: 4, UserID: 1 }
+                    break;
+                case 'PushSoftware': // 推送固件升级包 (Push Firmware Upgrade Package)
+                    responsePayload.PushSoftware = payload; // payload: { SoftwareURL, SoftwareMD5, SoftwareVer }
+                    break;
+                case 'PushSystemFile': // 推送系统文件 (Push System File)
+                    responsePayload.PushSystemFile = payload; // payload: [{ FileURL, FileMD5, FileType, FileIndex, IsDelete }]
+                    break;
+                case 'Snapshoot': // 获取设备快照 (Get Device Snapshot)
+                     responsePayload.Snapshoot = payload.value !== undefined ? payload.value : 1;
+                     break;
+                // TODO: 根据API文档，补充或调整其他命令类型 (Add or adjust other command types based on API documentation)
+                // 例如: UploadPeoplePhoto, UploadFaceFeature, UploadFingerFeature, UploadPalmVeinFeature
+                // (For example: UploadPeoplePhoto, UploadFaceFeature, UploadFingerFeature, UploadPalmVeinFeature)
+                // 这些可能需要设备主动上传，平台通过此接口下发指令让设备准备上传。
+                // (These might require the device to actively upload, and the platform issues commands via this interface to prepare the device for upload.)
+                // 例如，如果有一个 "PrepareUploadFace" 命令:
+                // (For example, if there's a "PrepareUploadFace" command:)
+                // case 'PrepareUploadFace':
+                //     responsePayload.PrepareUploadFace = payload; // payload: { UserID: "123" }
+                //     break;
+                default:
+                    console.warn(`设备 SN: ${SN} - 未知或未在switch中处理的命令类型: ${commandToExecute.commandType}`);
+                    // (Device SN: ${SN} - Unknown or unhandled command type in switch: ${commandToExecute.commandType})
+                    // 对于未明确处理的命令，我们仅返回 Success:1，不添加特定指令字段。
+                    // (For unhandled commands, we only return Success:1 without adding specific instruction fields.)
+                    // 这样做是为了让命令状态仍被更新为 'Sent'，避免重复拉取。
+                    // (This is done so the command status is still updated to 'Sent', avoiding repeated fetching.)
+                    // 另一种策略可能是将其标记为 'Failed' 并记录错误。
+                    // (Another strategy could be to mark it as 'Failed' and log an error.)
+                    break; 
+            }
+
+            // 更新命令状态
+            // (Update command status)
+            commandToExecute.status = 'Sent';
+            commandToExecute.lastAttemptAt = new Date();
+            commandToExecute.retryCount = (commandToExecute.retryCount || 0) + 1;
+            await commandToExecute.save();
+
+            console.log(`设备 SN: ${SN} - 命令 ${commandToExecute.commandType} 已发送。响应: ${JSON.stringify(responsePayload)}`);
+            // (Device SN: ${SN} - Command ${commandToExecute.commandType} has been sent. Response: ${JSON.stringify(responsePayload)})
+            res.json(responsePayload);
+
+        } else {
+            // 如果没有找到待处理的命令 (If no pending command found)
+            console.log(`设备 SN: ${SN} 无待处理的远程操作指令。 (Device SN: ${SN} has no pending remote operation commands.)`);
+            res.json({
+                "Success": 1,
+                "Message": "当前无待处理的远程操作指令 (Currently no pending remote operation commands)"
+            });
+        }
+    } catch (error) {
+        console.error(`设备 SN: ${SN}, 处理远程指令请求时发生错误 (Error processing remote command request for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理远程指令 (Server internal error processing remote commands)' });
+    }
 });
 
 // 处理设备下载工作参数的请求
 // @route POST /Device/DownloadWorkSetting
-// @desc 设备在收到心跳包中 SyncParameter=1 指令后，请求此接口下载最新配置 (Device requests this interface to download the latest configuration after receiving SyncParameter=1 command in the heartbeat package)
+// @desc 设备在收到心跳包中 SyncParameter=1 指令后，请求此接口下载最新配置
+// (Device requests this interface to download the latest configuration after receiving SyncParameter=1 command in the heartbeat package)
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/DownloadWorkSetting', (req, res) => {
-    // 从请求体中获取设备SN
-    // Get device SN from the request body
+router.post('/DownloadWorkSetting', async (req, res) => { // 转换为 async 函数 (Converted to async function)
     const { SN } = req.body;
 
-    // 打印接收到的设备SN (用于当前阶段的调试)
-    // Print received device SN (for debugging in the current phase)
-    console.log(`设备 SN: ${SN} 请求下载工作参数。 (Device SN: ${SN} requests download of work parameters.)`);
+    if (!SN) {
+        // 如果SN为空，则返回错误 (If SN is empty, return an error)
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空 (DeviceSN cannot be empty)' });
+    }
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 从数据库 (Device 集合) 查询该设备的最新工作参数 (Query the latest work parameters for this device from the database (Device collection))
-    // 3. 构建完整的参数对象并返回 (Construct the complete parameter object and return it)
+    try {
+        // 根据设备SN从数据库查找设备文档
+        // (Find the device document from the database based on device SN)
+        const device = await Device.findOne({ deviceSN: SN });
 
-    // 返回包含占位符参数的标准响应
-    // Return standard response with placeholder parameters
-    // 注意：这里的参数是示例性的，真实实现需要从数据库动态获取
-    // Note: The parameters here are exemplary; actual implementation requires dynamic retrieval from the database.
-    res.json({
-        "Success": 1, // 1 表示操作成功 (1 means operation successful)
-        "DeviceSN": SN, // 将请求的SN回显 (Echo back the requested SN)
-        "FireAlarm": 0, // 消防报警: 0 关闭, 1 开启 (Fire alarm: 0 Off, 1 On - example)
-        "DoorLongOpenAlarm": 0, // 开门超时报警: 0 关闭, 1 开启 (Door open timeout alarm: 0 Off, 1 On - example)
-        "Language": 1, // 语言: 1-中文 (Language: 1-Chinese - example)
-        "HTTPClient_ServerAddr": "http://your.platform.ip:port", // 平台服务器地址 (Platform server address - example)
-        "HTTPClient_KeepaliveTime": 30, // 心跳间隔, 单位秒 (Keepalive interval, in seconds - example)
-        "RelayTime": 5, // 继电器动作时间, 单位秒 (Relay action time, in seconds - example)
-        "RebootDay": 0, // 自动重启日: 0-每天, 1-周一...7-周日 (Auto reboot day: 0-Everyday, 1-Monday...7-Sunday - example)
-        "RebootHour": 3 // 自动重启小时 (Auto reboot hour - example)
-        // 根据需要可添加更多参数字段... (More parameter fields can be added as needed...)
-    });
+        if (!device) {
+            // 如果未找到设备 (If device is not found)
+            console.log(`设备 SN: ${SN} 请求下载参数，但设备未在数据库中找到。 (Device SN: ${SN} requested download parameters, but device not found in database.)`);
+            return res.status(404).json({ Success: 0, Message: '设备未注册或未找到 (Device not registered or not found)' });
+        }
+
+        // 检查设备是否有已存储的工作参数 (workSettings)
+        // (Check if the device has stored work parameters (workSettings))
+        // Object.keys().length > 0 用于确保 workSettings 不是一个空对象 {}
+        // (Object.keys().length > 0 is used to ensure workSettings is not an empty object {})
+        if (device.workSettings && typeof device.workSettings === 'object' && Object.keys(device.workSettings).length > 0) {
+            console.log(`为设备 SN: ${SN} 返回已存储的工作参数。 (Returning stored work parameters for device SN: ${SN}.)`);
+            // 成功找到设备且有参数，返回 Success:1 和 workSettings
+            // (Successfully found device and parameters exist, return Success:1 and workSettings)
+            // workSettings 应该已经包含了设备期望的完整结构，因为它是由 UploadWorkSetting 的 req.body 整体存入的
+            // (workSettings should already contain the complete structure expected by the device, as it was stored from the entire req.body of UploadWorkSetting)
+            res.json({
+                "Success": 1,
+                ...device.workSettings 
+            });
+        } else {
+            // 设备存在，但没有有效的 workSettings
+            // (Device exists, but no valid workSettings)
+            console.log(`设备 SN: ${SN} 存在，但无工作参数配置或参数为空。返回提示信息。 (Device SN: ${SN} exists, but no work parameter configuration or parameters are empty. Returning informational message.)`);
+            res.json({
+                "Success": 1, // 即使没有参数，操作本身是成功的 (Even if no parameters, the operation itself is successful)
+                "Message": "设备参数尚未配置或为空 (Device parameters not yet configured or empty)",
+                "DeviceSN": SN // 包含设备SN，让设备知道是针对它的响应 (Include deviceSN so the device knows it's a response for it)
+                // 注意: 根据API文档，设备通常期望接收到一个完整的参数结构。
+                // (Note: According to API documentation, devices usually expect to receive a complete parameter structure.)
+                // 在实际应用中，如果 workSettings 为空，可能需要返回一个包含所有字段的、预定义的默认参数结构。
+                // (In a real application, if workSettings is empty, it might be necessary to return a predefined default parameter structure containing all fields.)
+                // 为简化当前步骤，我们仅返回消息。后续可以根据具体需求扩展此处的默认参数。
+                // (To simplify the current step, we only return a message. Default parameters here can be expanded later based on specific needs.)
+            });
+        }
+
+    } catch (error) {
+        console.error(`为设备 SN: ${SN} 查询工作参数时发生错误 (Error querying work parameters for device SN: ${SN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误查询设备参数 (Server internal error querying device parameters)' });
+    }
 });
 
 // 处理设备上传工作参数的请求
 // @route POST /Device/UploadWorkSetting
 // @desc 设备上传其当前的工作参数设置 (Device uploads its current work parameter settings)
 // @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
-router.post('/UploadWorkSetting', (req, res) => {
-    // 从请求体中获取设备SN和工作参数
-    // Get device SN and work parameters from the request body
-    const { DeviceSN } = req.body; // DeviceSN 是顶级字段之一 (DeviceSN is one of the top-level fields)
-    // const workSettings = req.body; // 完整的参数对象 (The complete parameter object)
+router.post('/UploadWorkSetting', async (req, res) => { // 转换为 async 函数 (Converted to async function)
+    const { DeviceSN } = req.body; // 主 DeviceSN 用于查询 (Main DeviceSN for query)
+    // 完整的 req.body 包含了所有工作参数，我们将其存入 workSettings 字段
+    // (The complete req.body contains all work parameters, we will store it in the workSettings field)
 
-    // 打印接收到的设备SN (用于当前阶段的调试)
-    // Print received device SN (for debugging in the current phase)
-    console.log(`接收到来自设备 SN: ${DeviceSN} 的工作参数上传请求。 (Received work parameter upload request from device SN: ${DeviceSN}.)`);
-    // console.log("设备参数详情 (Device parameter details):", JSON.stringify(workSettings, null, 2)); // 可选择性打印完整参数，注意数据量 (Optionally print full parameters, be mindful of data volume)
+    if (!DeviceSN) {
+        // 如果请求体中没有DeviceSN，则无法处理 (If DeviceSN is not in the request body, it cannot be processed)
+        console.log('设备工作参数上传请求失败: DeviceSN为空。请求体 (Device work parameter upload request failed: DeviceSN is empty. Request body):', req.body);
+        return res.status(400).json({ Success: 0, Message: '设备SN不能为空 (DeviceSN cannot be empty)' });
+    }
 
-    // TODO: 在后续步骤中，这里将包含:
-    // In subsequent steps, this will include:
-    // 1. 验证设备SN的合法性 (Validate the legitimacy of the device SN)
-    // 2. 解析并验证接收到的参数结构是否符合预期 (Parse and validate if the received parameter structure meets expectations)
-    // 3. 将这些参数存储或更新到数据库中对应的设备文档 (Device 集合) (Store or update these parameters in the corresponding device document in the database (Device collection))
+    try {
+        // 查找并更新设备的工作参数
+        // (Find and update the device's work parameters)
+        // 如果设备不存在，upsert:true 会根据 DeviceSN 创建新设备
+        // (If the device does not exist, upsert:true will create a new device based on DeviceSN)
+        // 并将 req.body 整体存入 workSettings 字段
+        // (And store the entire req.body into the workSettings field)
+        const updatedDevice = await Device.findOneAndUpdate(
+            { deviceSN: DeviceSN }, // 查询条件 (Query condition)
+            { 
+                $set: { // 使用 $set 操作符更新字段 (Use $set operator to update fields)
+                    workSettings: req.body, // 将整个请求体作为工作参数存下来 (Store the entire request body as work parameters)
+                    deviceName: req.body.DeviceName || `Device_${DeviceSN}`, // 如果参数中有DeviceName则使用，否则生成一个 (Use DeviceName from parameters if present, otherwise generate one)
+                    firmwareVersion: req.body.FirmwareVerson, // 示例：也可以提取特定参数更新到顶层字段 (Example: specific parameters can also be extracted and updated to top-level fields)
+                    // 根据设备schema，httpClientServerAddr 和 httpClientKeepaliveTime 也在顶层
+                    // (According to device schema, httpClientServerAddr and httpClientKeepaliveTime are also top-level)
+                    httpClientServerAddr: req.body.HTTPClient?.ServerAddr, // 从嵌套结构中提取 (Extract from nested structure)
+                    httpClientKeepaliveTime: req.body.HTTPClient?.KeepaliveTime, // 从嵌套结构中提取 (Extract from nested structure)
+                    // 更多 req.body 中的字段可以按需映射到 Device schema 的顶层字段
+                    // (More fields from req.body can be mapped to top-level fields of the Device schema as needed)
+                },
+                $setOnInsert: { deviceSN: DeviceSN } // 确保在创建时 deviceSN 被设置 (Ensure deviceSN is set on creation)
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true } // 选项：更新或插入，返回更新后的文档，应用默认值 (Options: update or insert, return updated document, apply defaults)
+        );
 
-    // 返回标准成功响应
-    // Return standard success response
-    res.json({
-        "Success": 1 // 1 表示操作成功 (1 means operation successful)
-    });
+        if (!updatedDevice) {
+            // 理论上 upsert:true 会创建，所以这里不太可能除非有并发问题或特殊情况
+            // (Theoretically, upsert:true will create, so this is unlikely unless there are concurrency issues or special circumstances)
+            console.error(`设备 SN: ${DeviceSN} 在工作参数上传时未找到也未能创建。 (Device SN: ${DeviceSN} not found and could not be created during work parameter upload.)`);
+            return res.status(404).json({ Success: 0, Message: '设备未找到且无法创建 (Device not found and could not be created)' });
+        }
+        
+        console.log(`设备 SN: ${DeviceSN} 的工作参数已成功上传并存储/更新。设备名称: ${updatedDevice.deviceName}, 固件版本: ${updatedDevice.firmwareVersion}`);
+        // (Device SN: ${DeviceSN}'s work parameters successfully uploaded and stored/updated. Device name: ${updatedDevice.deviceName}, Firmware version: ${updatedDevice.firmwareVersion})
+        
+        res.json({
+            "Success": 1 // 1 表示操作成功 (1 means operation successful)
+        });
+
+    } catch (error) {
+        console.error(`处理设备 SN: ${DeviceSN} 的工作参数上传时发生错误 (Error processing work parameter upload for device SN: ${DeviceSN}):`, error);
+        res.status(500).json({ Success: 0, Message: '服务器内部错误处理参数上传 (Server internal error processing parameter upload)' });
+    }
 });
 
 // 导出路由模块
