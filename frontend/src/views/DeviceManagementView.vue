@@ -1,150 +1,227 @@
 <template>
   <div class="device-management-view">
     <h2>设备管理</h2>
-    <!-- 设备管理页面标题 -->
-    <!-- Device Management Page Title -->
 
-    <el-table :data="deviceList" style="width: 100%" border stripe>
-      <!-- Element Plus 表格，用于显示设备列表 -->
-      <!-- Element Plus table for displaying the device list -->
-
-      <el-table-column prop="sn" label="设备SN" width="180" />
-      <!-- 表格列：设备SN -->
-      <!-- Table Column: Device SN -->
-
-      <el-table-column prop="name" label="设备名称" width="180" />
-      <!-- 表格列：设备名称 -->
-      <!-- Table Column: Device Name -->
-
-      <el-table-column prop="ipAddress" label="IP地址" width="150" />
-      <!-- 表格列：IP地址 -->
-      <!-- Table Column: IP Address -->
-
+    <el-table :data="deviceList" style="width: 100%" border stripe v-loading="loading">
+      <el-table-column prop="deviceSN" label="设备SN" width="180" />
+      <el-table-column prop="deviceName" label="设备名称" width="180" />
+      <el-table-column prop="ipAddress" label="IP地址 (设备上报)" width="150" />
+      <el-table-column prop="statusIpAddress" label="IP地址 (心跳来源)" width="150" />
       <el-table-column prop="onlineStatus" label="在线状态" width="100">
-        <!-- 表格列：在线状态，使用自定义模板显示标签 -->
-        <!-- Table Column: Online Status, uses custom template to display a tag -->
         <template #default="scope">
           <el-tag :type="scope.row.onlineStatus ? 'success' : 'danger'">
             {{ scope.row.onlineStatus ? '在线' : '离线' }}
-            <!-- 根据在线状态显示不同颜色和文本的标签 -->
-            <!-- Tag with different color and text based on online status -->
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column prop="lastKeepaliveAt" label="最后心跳时间" width="200">
+         <template #default="scope">
+          {{ formatDateTime(scope.row.lastKeepaliveAt) }}
+        </template>
+      </el-table-column>
+      <el-table-column prop="firmwareVersion" label="固件版本" width="120" />
 
-      <el-table-column prop="lastKeepalive" label="最后心跳时间" width="200" />
-      <!-- 表格列：最后心跳时间 -->
-      <!-- Table Column: Last Keepalive Time -->
-
-      <el-table-column label="操作" width="280">
-        <!-- 表格列：操作按钮，使用自定义模板 -->
-        <!-- Table Column: Action Buttons, uses custom template -->
+      <el-table-column label="操作" width="280" fixed="right">
         <template #default="scope">
           <el-button size="small" @click="handleViewDetails(scope.row)">详情</el-button>
-          <!-- 详情按钮 -->
-          <!-- Details Button -->
           <el-button size="small" type="primary" @click="handleConfigure(scope.row)">参数配置</el-button>
-          <!-- 参数配置按钮 -->
-          <!-- Configure Parameters Button -->
           <el-button size="small" type="warning" @click="handleRemoteOperation(scope.row)">远程操作</el-button>
-          <!-- 远程操作按钮 -->
-          <!-- Remote Operations Button -->
         </template>
       </el-table-column>
     </el-table>
 
-    <!-- TODO: 详情弹窗、参数配置弹窗、远程操作弹窗 -->
-    <!-- Placeholder for future dialogs for details, configuration, and remote operations -->
+    <!-- 详情弹窗 -->
+    <el-dialog v-model="showDetailsDialog" title="设备详情" width="60%">
+      <div v-if="selectedDeviceDetails">
+        <pre>{{ JSON.stringify(selectedDeviceDetails, null, 2) }}</pre>
+      </div>
+      <div v-else>加载中...</div>
+      <template #footer>
+        <el-button @click="showDetailsDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 参数配置弹窗 -->
+    <el-dialog v-model="showConfigureDialog" title="参数配置" width="70%">
+      <div v-if="currentWorkSettings">
+        <p>设备SN: {{ selectedDeviceForConfig?.deviceSN }}</p>
+        <el-input
+          type="textarea"
+          :rows="15"
+          placeholder="请输入JSON格式的工作参数"
+          v-model="editableWorkSettings"
+        />
+      </div>
+      <div v-else>加载配置中...</div>
+      <template #footer>
+        <el-button @click="showConfigureDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveWorkSettings">保存</el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
-<script lang="ts">
-import { defineComponent, ref, onMounted } from 'vue';
-// 导入Vue组合式API 和 Element Plus 组件 (Import Vue Composition API and Element Plus components)
-// Element Plus 组件已在 main.ts 全局注册，此处按需导入仅为示例或在特定情况下使用 (Element Plus components are globally registered in main.ts, importing here is for example or specific cases)
-// import { ElTable, ElTableColumn, ElButton, ElTag } from 'element-plus';
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus'; // For notifications
+import { 
+  fetchDevices, 
+  fetchDeviceDetails, 
+  updateDeviceWorkSettings 
+} from '../services/api';
 
 // 定义设备数据接口
-// Define the interface for device data
 interface Device {
-  id: string; // 唯一标识，可以是SN (Unique identifier, can be SN)
-  sn: string; // 设备序列号 (Device serial number)
-  name: string; // 设备名称 (Device name)
-  ipAddress: string; // IP地址 (IP address)
-  onlineStatus: boolean; // 在线状态 (Online status)
-  lastKeepalive: string; // 最后心跳时间 (字符串格式，方便显示) (Last keepalive time - string format for easy display)
+  _id: string;
+  deviceSN: string;
+  deviceName?: string;
+  ipAddress?: string; // IP reported by device itself (e.g. from workSettings or initial registration)
+  onlineStatus: boolean;
+  lastKeepaliveAt?: string | null;
+  statusIpAddress?: string | null; // IP from where the last keepalive was received
+  firmwareVersion?: string;
+  workSettings?: any; // Can be a complex object
+  // Add other fields from Device model + DeviceStatus model as needed for display
+  manufacturer?: string;
+  productionDate?: string;
+  macAddress?: string;
+  // etc.
 }
 
-export default defineComponent({
-  name: 'DeviceManagementView', // 组件名称 (Component name)
-  components: {
-    // 如果选择按需导入Element Plus组件，请在此处注册它们
-    // If you choose to import Element Plus components on demand, register them here:
-    // ElTable,
-    // ElTableColumn,
-    // ElButton,
-    // ElTag,
-  },
-  setup() {
-    // Vue 3 Composition API setup function
+const loading = ref(false);
+const deviceList = ref<Device[]>([]);
 
-    // 模拟设备列表数据 (Simulate device list data)
-    const deviceList = ref<Device[]>([
-      { id: 'FC-8200H12345678', sn: 'FC-8200H12345678', name: '一号门禁机', ipAddress: '192.168.1.101', onlineStatus: true, lastKeepalive: new Date().toLocaleString() },
-      { id: 'FC-8200HABCDEFGH', sn: 'FC-8200HABCDEFGH', name: '二号人脸桩', ipAddress: '192.168.1.102', onlineStatus: false, lastKeepalive: new Date(Date.now() - 3600 * 1000 * 5).toLocaleString() }, // 5小时前 (5 hours ago)
-      { id: 'FC-8300T98765432', sn: 'FC-8300T98765432', name: '办公区闸机', ipAddress: '192.168.1.103', onlineStatus: true, lastKeepalive: new Date(Date.now() - 60000 * 2).toLocaleString() }, // 2分钟前 (2 minutes ago)
-    ]);
+const showDetailsDialog = ref(false);
+const selectedDeviceDetails = ref<Device | null>(null);
 
-    // TODO: 替换为从API获取数据的逻辑
-    // Placeholder for fetching data from API in the future
-    // onMounted(async () => {
-    //   try {
-    //     // deviceList.value = await fetchDevices(); // 假设 fetchDevices 在 api.ts 中定义并返回 Device[] (Assuming fetchDevices is defined in api.ts and returns Device[])
-    //   } catch (error) {
-    //     console.error("获取设备列表失败: (Failed to fetch device list:)", error);
-    //   }
-    // });
+const showConfigureDialog = ref(false);
+const selectedDeviceForConfig = ref<Device | null>(null);
+const currentWorkSettings = ref<any>(null);
+const editableWorkSettings = ref(''); // For editing workSettings as JSON string
 
-    // 处理查看详情操作
-    // Handle view details operation
-    const handleViewDetails = (device: Device) => {
-      console.log('查看设备详情 (View Device Details):', device.sn);
-      // TODO: 实现显示设备详细信息的逻辑 (例如，通过弹窗或跳转到详情页)
-      // Implement logic to show device details (e.g., via dialog or navigation to a details page)
-    };
+const formatDateTime = (dateTimeString: string | null | undefined) => {
+  if (!dateTimeString) return 'N/A';
+  try {
+    return new Date(dateTimeString).toLocaleString();
+  } catch (e) {
+    return dateTimeString; // if parsing fails, return original string
+  }
+};
 
-    // 处理参数配置操作
-    // Handle configure parameters operation
-    const handleConfigure = (device: Device) => {
-      console.log('配置设备参数 (Configure Device Parameters):', device.sn);
-      // TODO: 实现参数配置的逻辑 (例如，通过弹窗显示可配置参数)
-      // Implement logic for parameter configuration (e.g., show configurable parameters in a dialog)
-    };
+// 获取设备列表
+const loadDevices = async () => {
+  loading.value = true;
+  try {
+    deviceList.value = await fetchDevices();
+  } catch (error: any) {
+    console.error("获取设备列表失败:", error);
+    ElMessage.error(`获取设备列表失败: ${error.message || '未知错误'}`);
+  } finally {
+    loading.value = false;
+  }
+};
 
-    // 处理远程操作
-    // Handle remote operation
-    const handleRemoteOperation = (device: Device) => {
-      console.log('执行远程操作 (Execute Remote Operation):', device.sn);
-      // TODO: 实现远程操作的逻辑 (例如，显示可用远程命令列表)
-      // Implement logic for remote operations (e.g., show a list of available remote commands)
-    };
-
-    // 返回组件模板所需的数据和方法
-    // Return data and methods needed by the component template
-    return {
-      deviceList,
-      handleViewDetails,
-      handleConfigure,
-      handleRemoteOperation,
-    };
-  },
+onMounted(() => {
+  loadDevices();
 });
+
+// 处理查看详情操作
+const handleViewDetails = async (device: Device) => {
+  showDetailsDialog.value = true;
+  selectedDeviceDetails.value = null; // Clear previous details
+  try {
+    selectedDeviceDetails.value = await fetchDeviceDetails(device.deviceSN);
+    console.log('查看设备详情 (View Device Details):', selectedDeviceDetails.value);
+  } catch (error: any) {
+    console.error(`获取设备 ${device.deviceSN} 详情失败:`, error);
+    ElMessage.error(`获取设备详情失败: ${error.message || '未知错误'}`);
+    showDetailsDialog.value = false; // Close dialog on error
+  }
+};
+
+// 处理参数配置操作
+const handleConfigure = async (device: Device) => {
+  showConfigureDialog.value = true;
+  selectedDeviceForConfig.value = device;
+  currentWorkSettings.value = null; // Clear previous
+  editableWorkSettings.value = '';
+  try {
+    const details = await fetchDeviceDetails(device.deviceSN);
+    currentWorkSettings.value = details.workSettings || {};
+    editableWorkSettings.value = JSON.stringify(currentWorkSettings.value, null, 2);
+    console.log('配置设备参数 (Configure Device Parameters), 当前参数 (Current Parameters):', currentWorkSettings.value);
+  } catch (error: any) {
+    console.error(`获取设备 ${device.deviceSN} 配置失败:`, error);
+    ElMessage.error(`获取设备配置失败: ${error.message || '未知错误'}`);
+    showConfigureDialog.value = false; // Close dialog on error
+  }
+};
+
+const saveWorkSettings = async () => {
+  if (!selectedDeviceForConfig.value || !editableWorkSettings.value) return;
+  
+  let parsedSettings;
+  try {
+    parsedSettings = JSON.parse(editableWorkSettings.value);
+  } catch (jsonError) {
+    ElMessage.error('工作参数不是有效的JSON格式。 (Work settings are not valid JSON format.)');
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要为设备 ${selectedDeviceForConfig.value.deviceSN} 保存新的工作参数吗？`,
+      '确认保存',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    );
+
+    // Proceed with saving
+    await updateDeviceWorkSettings(selectedDeviceForConfig.value.deviceSN, parsedSettings);
+    ElMessage.success('工作参数已成功更新。 (Work settings updated successfully.)');
+    showConfigureDialog.value = false;
+    // Optionally, refresh the device list or the specific device's details
+    loadDevices(); // Or update just the one device in the list
+  } catch (error: any) {
+    // If error is 'cancel', it means ElMessageBox was cancelled, do nothing.
+    if (error !== 'cancel') {
+       console.error(`保存设备 ${selectedDeviceForConfig.value.deviceSN} 工作参数失败:`, error);
+       ElMessage.error(`保存工作参数失败: ${error.message || '未知错误'}`);
+    }
+  }
+};
+
+
+// 处理远程操作
+const handleRemoteOperation = (device: Device) => {
+  console.log('执行远程操作 (Execute Remote Operation):', device.deviceSN);
+  ElMessage.info(`远程操作功能待实现 (Remote operation for ${device.deviceSN} to be implemented)`);
+  // TODO: 实现远程操作的逻辑 (例如，显示可用远程命令列表)
+};
+
 </script>
 
 <style scoped>
 .device-management-view {
-  padding: 20px; /* 视图内边距 (Padding for the view) */
+  padding: 20px;
 }
 /* 可以添加更多自定义样式 */
-/* More custom styles can be added here */
+.el-table {
+  margin-top: 20px;
+}
+.el-dialog div {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.el-dialog pre {
+  background-color: #f5f5f5;
+  padding: 10px;
+  border-radius: 4px;
+  white-space: pre-wrap; /* Allows wrapping of long lines */
+  word-break: break-all; /* Breaks long words/strings */
+}
 </style>
