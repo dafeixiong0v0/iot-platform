@@ -56,4 +56,56 @@ router.post('/enqueue-command', async (req, res) => {
     }
 });
 
+// 手动重试特定命令
+// (Manually retry a specific command)
+// @route POST /internal/retry-command/:commandId
+// @desc 重新计划一个命令的执行，通常用于已失败或卡住的命令
+// (Reschedule a command for execution, typically for commands that have failed or are stuck)
+// @access Restricted (应有权限控制)
+// (Restricted - should have permission control)
+router.post('/retry-command/:commandId', async (req, res) => {
+    const { commandId } = req.params;
+
+    if (!commandId) { // 理论上 Express 路由参数不会为空，但作为额外检查 (Theoretically, Express route parameters won't be empty, but as an extra check)
+        return res.status(400).json({ Success: 0, Message: 'Command ID 不能为空 (Command ID cannot be empty)' });
+    }
+
+    try {
+        const command = await RemoteCommandQueue.findById(commandId);
+
+        if (!command) {
+            console.log(`手动重试命令失败: 未找到 Command ID ${commandId}。 (Manual retry command failed: Command ID ${commandId} not found.)`);
+            return res.status(404).json({ Success: 0, Message: '未找到指定的命令 (Command not found)' });
+        }
+
+        // 更新命令状态以进行重试
+        // (Update command status for retry)
+        command.status = 'Pending';
+        command.retryCount = 0;
+        command.errorMessage = undefined; // 清除之前的错误信息 (Clear previous error message)
+        command.lastUpdatedAt = new Date(); // 记录本次重置操作的时间 (Record the time of this reset operation)
+        // lastAttemptAt 应该在下次实际尝试发送时更新 (lastAttemptAt should be updated on the next actual send attempt)
+
+        const updatedCommand = await command.save();
+
+        console.log(`命令 ${commandId} 已被手动重置以进行重试。设备SN: ${updatedCommand.deviceSN}, 类型: ${updatedCommand.commandType}`);
+        // (Command ${commandId} has been manually reset for retry. Device SN: ${updatedCommand.deviceSN}, Type: ${updatedCommand.commandType})
+        
+        res.json({ 
+            Success: 1, 
+            Message: '命令已成功重置并计划重试 (Command successfully reset and scheduled for retry)', 
+            command: updatedCommand 
+        });
+
+    } catch (error) {
+        console.error(`手动重试命令 ${commandId} 时发生错误:`, error);
+        // (Error manually retrying command ${commandId}:)
+        if (error.name === 'CastError' && error.kind === 'ObjectId') {
+            // 如果 commandId 格式无效 (If commandId format is invalid)
+             return res.status(400).json({ Success: 0, Message: '提供的 Command ID 格式无效 (Invalid Command ID format provided)' });
+        }
+        res.status(500).json({ Success: 0, Message: '服务器内部错误，无法重试命令 (Server internal error, failed to retry command)' });
+    }
+});
+
 module.exports = router;
