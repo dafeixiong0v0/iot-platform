@@ -1,0 +1,68 @@
+# docker-compose.vps.yml (适用于 VPS 部署的 Docker Compose 文件示例)
+# 此文件假定您已经将后端和前端的 Docker 镜像构建并推送到了 Docker Hub。
+version: '3.8' # 指定 Docker Compose 文件版本
+
+services:
+  # 后端 Node.js 服务
+  backend:
+    image: yourdockerhubusername/iot-backend:latest # 重要: 使用您在 Docker Hub 上的后端镜像
+    # build: # 在 VPS 部署中，我们使用预构建的镜像，而不是在服务器上构建
+    #   context: .
+    #   dockerfile: Dockerfile.backend
+    ports:
+      - "3000:3000" # 将主机的3000端口映射到容器的3000端口
+    # volumes: # 在生产镜像中，代码已经包含在镜像里，不需要挂载本地代码卷
+      # - .:/usr/src/app 
+      # - /usr/src/app/node_modules
+    environment:
+      - NODE_ENV=production # 设置为生产环境模式
+      - MONGO_URI=mongodb://mongo_db:27017/iot_platform # MongoDB 连接字符串
+    depends_on:
+      - mongo_db # 声明依赖于 MongoDB 服务
+    networks:
+      - iot-network
+    restart: unless-stopped # 容器退出时重启策略 (除非手动停止)
+
+  # 前端 Vue.js 服务 (由 Nginx 服务)
+  frontend:
+    image: yourdockerhubusername/iot-frontend:latest # 重要: 使用您在 Docker Hub 上的前端镜像
+    # build: # 同上，使用预构建镜像
+    #   context: .
+    #   dockerfile: Dockerfile.frontend
+    ports:
+      - "80:80" # 生产环境通常将前端映射到80端口 (如果VPS的80端口可用)
+                # 如果有其他服务 (如已有的Nginx或Apache) 使用80端口，您可能需要映射到其他端口，例如 8080:80
+                # 然后使用反向代理将域名指向此端口
+    depends_on: 
+      - backend # 可选，确保后端先启动，前端API请求能送达
+    networks:
+      - iot-network
+    restart: unless-stopped # 容器退出时重启策略
+
+  # MongoDB 服务
+  mongo_db:
+    image: mongo:6.0 # 使用官方 MongoDB 6.0 镜像 (或 mongo:latest)
+    ports:
+      # 安全提示: 不建议将 MongoDB 端口直接暴露给公网。
+      # 如果您的应用都在同一个 Docker 网络内，后端服务可以通过服务名(mongo_db)在内部访问27017端口。
+      # 如果确实需要从外部访问 (例如进行数据库管理或调试)，请确保有防火墙规则严格限制访问源IP。
+      # 以下配置仅允许从VPS本机访问MongoDB的27017端口。
+      - "127.0.0.1:27017:27017" 
+    volumes:
+      - mongo_data:/data/db # 使用名为 mongo_data 的数据卷持久化数据库数据
+    networks:
+      - iot-network
+    restart: always # 容器退出时总是重启 (适合数据库)
+    # environment: # 可选：为生产环境设置MongoDB用户名和密码，请务必修改默认值
+    #   - MONGO_INITDB_ROOT_USERNAME=yourmongouser 
+    #   - MONGO_INITDB_ROOT_PASSWORD=yoursecuremongopassword
+
+# 自定义网络
+networks:
+  iot-network:
+    driver: bridge
+
+# 数据卷定义
+volumes:
+  mongo_data: # 定义名为 mongo_data 的数据卷，用于 MongoDB 数据持久化
+              # Docker 会自动创建这个卷。数据将存储在VPS宿主机的Docker管理目录下。

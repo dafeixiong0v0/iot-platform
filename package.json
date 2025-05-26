@@ -1,0 +1,26 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dafeixiong0v0/iot-platform.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/dafeixiong0v0/iot-platform/issues"
+  },
+  "homepage": "https://github.com/dafeixiong0v0/iot-platform#readme",
+  "dependencies": {
+    "express": "^5.1.0",
+    "mongoose": "^7.0.0",
+    "multer": "^2.0.0"
+  }
+}
