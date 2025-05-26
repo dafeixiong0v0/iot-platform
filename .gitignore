@@ -28,6 +28,7 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+.history
 
 # Misc
 .DS_Store

@@ -1,10 +1,10 @@
 // frontend/src/router/index.ts
-import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue' // 示例视图 (Example View)
 
 // 定义路由规则
 // Define routing rules
-const routes: Array<RouteRecordRaw> = [
+const routes: Array<any> = [
   {
     path: '/',
     name: 'home', // 首页 (Home Page)

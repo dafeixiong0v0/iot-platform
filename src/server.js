@@ -18,8 +18,8 @@ const startServer = async () => {
 
   // 数据库连接成功后 (或尝试连接后)，启动 Express 应用服务器
   // After successful database connection (or connection attempt), start the Express application server
-  app.listen(PORT, () => {
-    console.log(`后端服务运行在 http://localhost:${PORT} (Backend server running on http://localhost:${PORT})`);
+  app.listen(9981, () => {
+    console.log(`后端服务运行在 http://localhost:${9981} (Backend server running on http://localhost:${9981})`);
     console.log('所有API路由已在 src/app.js 中配置，并通过各自的路由文件 (例如 src/api/deviceRoutes.js) 实现。 (All API routes are configured in src/app.js and implemented through their respective route files (e.g., src/api/deviceRoutes.js).)');
     console.log('要测试心跳接口，请发送 POST 请求到 /Device/Keepalive (To test the keepalive endpoint, send a POST request to /Device/Keepalive)');
   });

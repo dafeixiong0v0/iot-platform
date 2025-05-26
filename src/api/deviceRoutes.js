@@ -104,14 +104,16 @@ router.post('/Keepalive', async (req, res) => { // 转换为 async 函数 (Conve
 
         // 查询 RemoteCommandQueue 集合中是否有针对此SN的待处理指令
         // (Query the RemoteCommandQueue collection for pending commands for this SN)
-        const pendingCommands = await RemoteCommandQueue.find({ 
-            deviceSN: SN, 
-            status: 'Pending'  // 仅查找状态为 'Pending' 的命令 (Only find commands with status 'Pending')
+        // Updated query to include retryCount < maxRetries condition
+        const pendingCommands = await RemoteCommandQueue.find({
+            deviceSN: SN,
+            status: 'Pending', // 仅查找状态为 'Pending' 的命令 (Only find commands with status 'Pending')
+            $expr: { $lt: ['$retryCount', '$maxRetries'] } // 确保 retryCount 小于 maxRetries (Ensure retryCount is less than maxRetries)
         }).sort({ priority: -1, createdAt: 1 }).lean(); // 按优先级高到低，然后按创建时间先到先执行
                                                         // (Sort by priority high to low, then by creation time first to execute)
 
         if (pendingCommands && pendingCommands.length > 0) {
-            console.log(`设备 SN: ${SN} 发现 ${pendingCommands.length} 条待处理命令。 (Device SN: ${SN} found ${pendingCommands.length} pending commands.)`);
+            console.log(`设备 SN: ${SN} 发现 ${pendingCommands.length} 条符合条件(未超重试次数)的待处理命令。 (Device SN: ${SN} found ${pendingCommands.length} eligible (not exceeding retry limit) pending commands.)`);
             for (const cmd of pendingCommands) {
                 if (cmd.commandType === 'SyncParameter') {
                     syncParameterFlag = 1;
@@ -369,103 +371,113 @@ router.post('/RemoteCommand', async (req, res) => { // 转换为 async 函数 (C
     }
     console.log(`设备 SN: ${SN} 请求远程操作指令。 (Device SN: ${SN} requests remote operation command.)`);
 
-    try {
-        // 查找优先级最高的一条待处理命令
-        // (Find the pending command with the highest priority)
-        const commandToExecute = await RemoteCommandQueue.findOne({
-            deviceSN: SN,
+    // 定义辅助函数以查找和处理命令，包括重试逻辑
+    // Define helper function to find and process commands, including retry logic
+    async function findAndProcessCommand(deviceSN, excludedCommandIds = []) {
+        const query = {
+            deviceSN: deviceSN,
             status: 'Pending' // 仅查找状态为 'Pending' 的命令 (Only find commands with status 'Pending')
-        }).sort({ priority: -1, createdAt: 1 }); // 按优先级高到低，然后按创建时间先到先执行
-                                                 // (Sort by priority high to low, then by creation time first to execute)
+        };
+        if (excludedCommandIds.length > 0) {
+            query._id = { $nin: excludedCommandIds }; // 排除已处理（失败）的命令ID (Exclude processed (failed) command IDs)
+        }
+
+        const commandToExecute = await RemoteCommandQueue.findOne(query)
+            .sort({ priority: -1, createdAt: 1 }); // 按优先级高到低，然后按创建时间先到先执行 (Sort by priority high to low, then by creation time first to execute)
+
+        if (!commandToExecute) {
+            return null; // 没有找到命令 (No command found)
+        }
+
+        const maxRetries = commandToExecute.maxRetries || 3; // 如果命令上没有定义maxRetries，则默认为3 (Default to 3 if maxRetries is not defined on the command)
+        const currentRetryCount = commandToExecute.retryCount || 0;
+
+        if (currentRetryCount >= maxRetries) {
+            // 达到或超过最大重试次数 (Reached or exceeded max retries)
+            commandToExecute.status = 'Failed';
+            commandToExecute.errorMessage = `Max retries (${maxRetries}) reached. Command not sent.`;
+            commandToExecute.lastUpdatedAt = new Date(); // 记录失败时间 (Record failure time)
+            await commandToExecute.save();
+            console.log(`命令 ${commandToExecute._id} 为设备 ${deviceSN} 因达到最大重试次数(${maxRetries})而失败。 (Command ${commandToExecute._id} for device ${deviceSN} failed due to max retries (${maxRetries}).)`);
+            
+            // 尝试查找下一个命令 (Try to find the next command)
+            return findAndProcessCommand(deviceSN, [...excludedCommandIds, commandToExecute._id]);
+        }
+
+        // 命令符合发送条件 (Command is eligible for sending)
+        return commandToExecute;
+    }
+
+    try {
+        const commandToExecute = await findAndProcessCommand(SN);
 
         if (commandToExecute) {
-            console.log(`设备 SN: ${SN} - 发现待执行命令: ${commandToExecute.commandType}, Payload: ${JSON.stringify(commandToExecute.commandPayload)}`);
-            // (Device SN: ${SN} - Found pending command: ${commandToExecute.commandType}, Payload: ${JSON.stringify(commandToExecute.commandPayload)})
+            console.log(`设备 SN: ${SN} - 发现待执行命令: ${commandToExecute.commandType}, ID: ${commandToExecute._id}, Payload: ${JSON.stringify(commandToExecute.commandPayload)}`);
+            // (Device SN: ${SN} - Found pending command: ${commandToExecute.commandType}, ID: ${commandToExecute._id}, Payload: ${JSON.stringify(commandToExecute.commandPayload)})
 
             const responsePayload = { Success: 1 };
             const payload = commandToExecute.commandPayload || {}; // 确保 payload 至少是一个空对象 (Ensure payload is at least an empty object)
 
             // 根据命令类型构建特定的响应字段
             // (Construct specific response fields based on command type)
-            // 参考HTTPv2文档 "API-远程操作指令" -> "返回值参数说明" 部分
-            // (Refer to HTTPv2 documentation "API-Remote Operation Commands" -> "Return Value Parameter Description" section)
             switch (commandToExecute.commandType) {
-                case 'Restart': // 远程重启 (Remote Restart)
-                    responsePayload.Restart = payload.value !== undefined ? payload.value : 1; // payload: { "value": 1 } or default to 1
+                case 'Restart':
+                    responsePayload.Restart = payload.value !== undefined ? payload.value : 1;
                     break;
-                case 'Recover': // 恢复出厂 (Factory Reset)
+                case 'Recover':
                     responsePayload.Recover = payload.value !== undefined ? payload.value : 1;
                     break;
-                case 'Opendoor': // 远程开门 (Remote Open Door)
-                    // payload 可以是直接的整数值，或者类似 { "value": 1 } 的对象
-                    // (payload can be a direct integer value, or an object like { "value": 1 })
-                    // API文档示例中是 "Opendoor: 1"，我们假设如果指定了payload则使用其值
-                    // (API documentation example is "Opendoor: 1", we assume if payload is specified, its value is used)
+                case 'Opendoor':
                     responsePayload.Opendoor = payload.value !== undefined ? payload.value : 1; 
                     break;
-                case 'Closealarm': // 关闭报警 (Close Alarm)
+                case 'Closealarm':
                     responsePayload.Closealarm = payload.value !== undefined ? payload.value : 1;
                     break;
-                case 'RepostRecord': // 重新上传记录 (Re-upload Records)
+                case 'RepostRecord':
                      responsePayload.RepostRecord = payload.value !== undefined ? payload.value : 1;
                      break;
-                case 'PushAllPeople': // 要求上传所有人员 (Request Upload All Personnel)
+                case 'PushAllPeople':
                     responsePayload.PushAllPeople = payload.value !== undefined ? payload.value : 1;
                     break;
-                case 'QueryPeople': // 要求上传指定用户号的人员 (Request Upload Specified Personnel)
-                    responsePayload.QueryPeople = payload.userIDs || []; // payload: { "userIDs": [1,2,3] }
+                case 'QueryPeople':
+                    responsePayload.QueryPeople = payload.userIDs || [];
                     break;
-                case 'ClearRecord': // 删除所有记录 (Delete All Records)
+                case 'ClearRecord':
                     responsePayload.ClearRecord = payload.value !== undefined ? payload.value : 1;
                     break;
-                case 'RegisterIdentifyTicket': // 在设备上注册凭证类型 (Register Credential Type on Device)
-                    responsePayload.RegisterIdentifyTicket = payload; // payload: { RegisterType: 4, UserID: 1 }
+                case 'RegisterIdentifyTicket':
+                    responsePayload.RegisterIdentifyTicket = payload;
                     break;
-                case 'PushSoftware': // 推送固件升级包 (Push Firmware Upgrade Package)
-                    responsePayload.PushSoftware = payload; // payload: { SoftwareURL, SoftwareMD5, SoftwareVer }
+                case 'PushSoftware':
+                    responsePayload.PushSoftware = payload;
                     break;
-                case 'PushSystemFile': // 推送系统文件 (Push System File)
-                    responsePayload.PushSystemFile = payload; // payload: [{ FileURL, FileMD5, FileType, FileIndex, IsDelete }]
+                case 'PushSystemFile':
+                    responsePayload.PushSystemFile = payload;
                     break;
-                case 'Snapshoot': // 获取设备快照 (Get Device Snapshot)
+                case 'Snapshoot':
                      responsePayload.Snapshoot = payload.value !== undefined ? payload.value : 1;
                      break;
-                // TODO: 根据API文档，补充或调整其他命令类型 (Add or adjust other command types based on API documentation)
-                // 例如: UploadPeoplePhoto, UploadFaceFeature, UploadFingerFeature, UploadPalmVeinFeature
-                // (For example: UploadPeoplePhoto, UploadFaceFeature, UploadFingerFeature, UploadPalmVeinFeature)
-                // 这些可能需要设备主动上传，平台通过此接口下发指令让设备准备上传。
-                // (These might require the device to actively upload, and the platform issues commands via this interface to prepare the device for upload.)
-                // 例如，如果有一个 "PrepareUploadFace" 命令:
-                // (For example, if there's a "PrepareUploadFace" command:)
-                // case 'PrepareUploadFace':
-                //     responsePayload.PrepareUploadFace = payload; // payload: { UserID: "123" }
-                //     break;
                 default:
-                    console.warn(`设备 SN: ${SN} - 未知或未在switch中处理的命令类型: ${commandToExecute.commandType}`);
-                    // (Device SN: ${SN} - Unknown or unhandled command type in switch: ${commandToExecute.commandType})
-                    // 对于未明确处理的命令，我们仅返回 Success:1，不添加特定指令字段。
-                    // (For unhandled commands, we only return Success:1 without adding specific instruction fields.)
-                    // 这样做是为了让命令状态仍被更新为 'Sent'，避免重复拉取。
-                    // (This is done so the command status is still updated to 'Sent', avoiding repeated fetching.)
-                    // 另一种策略可能是将其标记为 'Failed' 并记录错误。
-                    // (Another strategy could be to mark it as 'Failed' and log an error.)
+                    console.warn(`设备 SN: ${SN} - 未知或未在switch中处理的命令类型: ${commandToExecute.commandType} (ID: ${commandToExecute._id})`);
+                    // (Device SN: ${SN} - Unknown or unhandled command type in switch: ${commandToExecute.commandType} (ID: ${commandToExecute._id}))
                     break; 
             }
 
-            // 更新命令状态
-            // (Update command status)
+            // 更新命令状态：标记为已发送，增加重试次数
+            // (Update command status: mark as sent, increment retry count)
             commandToExecute.status = 'Sent';
             commandToExecute.lastAttemptAt = new Date();
             commandToExecute.retryCount = (commandToExecute.retryCount || 0) + 1;
+            commandToExecute.lastUpdatedAt = new Date(); // 记录状态更新时间 (Record status update time)
             await commandToExecute.save();
 
-            console.log(`设备 SN: ${SN} - 命令 ${commandToExecute.commandType} 已发送。响应: ${JSON.stringify(responsePayload)}`);
-            // (Device SN: ${SN} - Command ${commandToExecute.commandType} has been sent. Response: ${JSON.stringify(responsePayload)})
+            console.log(`设备 SN: ${SN} - 命令 ${commandToExecute.commandType} (ID: ${commandToExecute._id}) 已发送 (尝试次数: ${commandToExecute.retryCount})。响应: ${JSON.stringify(responsePayload)}`);
+            // (Device SN: ${SN} - Command ${commandToExecute.commandType} (ID: ${commandToExecute._id}) has been sent (Attempt: ${commandToExecute.retryCount}). Response: ${JSON.stringify(responsePayload)})
             res.json(responsePayload);
 
         } else {
-            // 如果没有找到待处理的命令 (If no pending command found)
-            console.log(`设备 SN: ${SN} 无待处理的远程操作指令。 (Device SN: ${SN} has no pending remote operation commands.)`);
+            // 如果没有找到符合条件的待处理命令 (If no eligible pending command found)
+            console.log(`设备 SN: ${SN} 无符合条件的待处理远程操作指令。 (Device SN: ${SN} has no eligible pending remote operation commands.)`);
             res.json({
                 "Success": 1,
                 "Message": "当前无待处理的远程操作指令 (Currently no pending remote operation commands)"
@@ -598,6 +610,85 @@ router.post('/UploadWorkSetting', async (req, res) => { // 转换为 async 函�
         res.status(500).json({ Success: 0, Message: '服务器内部错误处理参数上传 (Server internal error processing parameter upload)' });
     }
 });
+
+// 新增：处理设备上报远程命令执行状态的请求
+// New: Handle device reporting of remote command execution status
+// @route POST /Device/UpdateCommandStatus
+// @desc 设备上报远程命令的执行状态更新 (Device reports updates to the execution status of a remote command)
+// @access Public (实际项目中需要身份验证 - Authentication will be needed in a real project)
+router.post('/UpdateCommandStatus', async (req, res) => {
+    const { SN, CommandID, Status, ErrorMessage } = req.body;
+
+    // 1. 校验必填字段
+    // 1. Validate required fields
+    if (!SN || !CommandID || !Status) {
+        console.log(`更新命令状态请求失败: 缺少必填字段。SN: ${SN}, CommandID: ${CommandID}, Status: ${Status}`);
+        // (Update command status request failed: Missing required fields. SN: ${SN}, CommandID: ${CommandID}, Status: ${Status})
+        return res.status(400).json({ Success: 0, Message: 'SN, CommandID, 和 Status 是必填项 (SN, CommandID, and Status are required)' });
+    }
+
+    // 2. 校验 Status 是否为有效值
+    // 2. Validate if Status is a valid value
+    const allowedStatuses = ['Pending', 'Sent', 'Acknowledged', 'Failed', 'Processing'];
+    if (!allowedStatuses.includes(Status)) {
+        console.log(`更新命令状态请求失败: 无效的状态值 '${Status}'。设备 SN: ${SN}, CommandID: ${CommandID}`);
+        // (Update command status request failed: Invalid status value '${Status}'. Device SN: ${SN}, CommandID: ${CommandID})
+        return res.status(400).json({ Success: 0, Message: `无效的状态值。允许的状态有: ${allowedStatuses.join(', ')} (Invalid status value. Allowed statuses are: ${allowedStatuses.join(', ')})` });
+    }
+
+    console.log(`接收到命令状态更新请求: 设备 SN: ${SN}, CommandID: ${CommandID}, Status: ${Status}` + (ErrorMessage ? `, ErrorMessage: ${ErrorMessage}` : ''));
+    // (Received command status update request: Device SN: ${SN}, CommandID: ${CommandID}, Status: ${Status}` + (ErrorMessage ? `, ErrorMessage: ${ErrorMessage}` : ''))
+
+    try {
+        // 3. 查找命令
+        // 3. Find the command
+        const command = await RemoteCommandQueue.findOne({ _id: CommandID, deviceSN: SN });
+
+        // 4. 如果命令未找到
+        // 4. If command not found
+        if (!command) {
+            console.log(`更新命令状态失败: 未找到匹配的命令。设备 SN: ${SN}, CommandID: ${CommandID}`);
+            // (Update command status failed: No matching command found. Device SN: ${SN}, CommandID: ${CommandID})
+            return res.status(404).json({ Success: 0, Message: '未找到指定的命令 (Specified command not found)' });
+        }
+
+        // 5. 更新命令状态
+        // 5. Update command status
+        command.status = Status;
+        command.lastUpdatedAt = new Date(); // 新增：记录状态更新时间 (New: Record status update time)
+
+        // 6. 如果状态为 'Failed' 且提供了 ErrorMessage，则更新 errorMessage
+        // 6. If Status is 'Failed' and ErrorMessage is provided, update errorMessage
+        if (Status === 'Failed' && ErrorMessage) {
+            command.errorMessage = ErrorMessage;
+        } else if (Status !== 'Failed') {
+            // 如果状态不是 'Failed'，可以考虑清除旧的错误信息 (或者根据需求保留)
+            // If status is not 'Failed', consider clearing old error messages (or retain based on requirements)
+            command.errorMessage = undefined; 
+        }
+        
+        // 7. 保存更新后的命令
+        // 7. Save the updated command
+        await command.save();
+
+        // 8. 记录成功更新
+        // 8. Log successful update
+        console.log(`命令 ${CommandID} 为设备 ${SN} 状态已成功更新为 ${Status}。`);
+        // (Command ${CommandID} for device ${SN} status successfully updated to ${Status}.)
+
+        // 9. 返回成功响应
+        // 9. Return success response
+        res.json({ Success: 1, Message: '命令状态更新成功 (Command status updated successfully)' });
+
+    } catch (error) {
+        // 10. 处理潜在错误
+        // 10. Handle potential errors
+        console.error(`更新命令 ${CommandID} (设备 SN: ${SN}) 状态时发生服务器错误:`, error);
+        // (Server error while updating status for command ${CommandID} (Device SN: ${SN}):`, error)
+        res.status(500).json({ Success: 0, Message: '服务器内部错误更新命令状态 (Server internal error updating command status)' });
+    }
+});
+
 
 // 导出路由模块
 // Export the router module
